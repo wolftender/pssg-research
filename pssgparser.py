@@ -2574,8 +2574,8 @@ class PssgViewerFrame(wx.Frame):
         def __init__(
             self,
             layout: list[LayoutElement],
-            vertices: ctypes.Array[ctypes.c_float] | bytearray,
-            indices: ctypes.Array[ctypes.c_uint32] | bytearray,
+            vertices: Any,
+            indices: Any,
         ):
             self.layout = layout
             self.vertices = vertices
@@ -2801,8 +2801,8 @@ class PssgViewerFrame(wx.Frame):
             for id, rendernode in self.pssg_tree.rendernodes.items():
                 self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
                     PssgViewerFrame.SceneMesh.POS_UV_COLOR_NORMAL_LAYOUT,
-                    rendernode.vertex_buffer,
-                    rendernode.index_buffer,
+                    (ctypes.c_ubyte * len(rendernode.vertex_buffer)).from_buffer(rendernode.vertex_buffer),
+                    (ctypes.c_ubyte * len(rendernode.index_buffer)).from_buffer(rendernode.index_buffer),
                 )
                 self.pssg_meshes[id].start()
 
