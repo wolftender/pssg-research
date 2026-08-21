@@ -112,6 +112,13 @@ class PssgElement:
 
         return None
 
+    def get_attribute(self, name: str) -> PssgAttribute:
+        attribute = self.find_attribute(name)
+        if attribute is None:
+            raise Exception(f"no attribute {name} found")
+
+        return attribute
+
 
 # this is for built-in types
 @dataclass
@@ -604,8 +611,8 @@ class PssgReader:
         self.buffer_offset += n
         return value
 
-    def _pssg_read_n_u8(self, n: int) -> tuple[int, ...]:
-        values = struct.unpack_from(f">{n}B", self.pssg_buffer, self.buffer_offset)
+    def _pssg_read_n_u8(self, n: int) -> bytes:
+        values = struct.unpack_from(f">{n}s", self.pssg_buffer, self.buffer_offset)[0]
         self.buffer_offset += n
         return values
 
@@ -900,6 +907,120 @@ class PssgReader:
 
         self.buffer_offset = pssg_element_end_offs
         return pssg_element
+
+
+def pssg_find_texture_block(root: PssgElement, id: str) -> Optional[PssgElement]:
+    libraries = root.find_children("LIBRARY")
+    for library in libraries:
+        library_type = library.find_attribute("type")
+        if library_type is None:
+            continue
+
+        if library_type.value == "RENDERINTERFACEBOUND":
+            textures = library.find_children("TEXTURE")
+            for texture in textures:
+                texture_id = texture.find_attribute("id")
+                if texture_id is None:
+                    continue
+
+                if texture_id.value == id:
+                    return texture
+
+    return None
+
+
+class PssgDecodedTexture:
+    def __init__(self, element: PssgElement):
+        if element.name != "TEXTURE":
+            raise Exception(
+                f"cannot decode a texture from an element of type {element.name}"
+            )
+
+        self.width = int(element.get_attribute("width").value)
+        self.height = int(element.get_attribute("height").value)
+        self.texel_format = str(element.get_attribute("texelFormat").value)
+
+        image_block = element.find_child("TEXTUREIMAGEBLOCK")
+        if image_block is None:
+            raise Exception("texture has no image block")
+
+        image_block_data = image_block.find_child("TEXTUREIMAGEBLOCKDATA")
+        if image_block_data is None:
+            raise Exception("texture image block has no data")
+
+        if self.texel_format == "dxt1":
+            self._decode_texels_dxt1(image_block_data.value)
+        else:
+            raise Exception(f"unknown texel format {self.texel_format}")
+
+    @classmethod
+    def _unpack_rgb565(cls, packed: int) -> tuple[int, int, int, int]:
+        r = (packed >> 11) & 0x1F
+        g = (packed >> 5) & 0x3F
+        b = (packed) & 0x1F
+
+        r = (r << 3) | (r >> 2)
+        g = (g << 2) | (g >> 4)
+        b = (b << 3) | (b >> 2)
+
+        return (r, g, b, 255)
+
+    def _decode_texels_dxt1(self, value: bytes):
+        block_count_x = self.width // 4
+        block_count_y = self.height // 4
+
+        self.texels = bytearray(self.width * self.height * 4)  # rgba
+        buffer_offset = 0
+
+        for row in range(block_count_y):
+            for col in range(block_count_x):
+                c0_packed = struct.unpack_from("<H", value, buffer_offset)[0]
+                buffer_offset += 2
+
+                c1_packed = struct.unpack_from("<H", value, buffer_offset)[0]
+                buffer_offset += 2
+
+                ctable = struct.unpack_from("<I", value, buffer_offset)[0]
+                buffer_offset += 4
+
+                c0 = self._unpack_rgb565(c0_packed)
+                c1 = self._unpack_rgb565(c1_packed)
+
+                r0 = c0[0]
+                g0 = c0[1]
+                b0 = c0[2]
+                r1 = c1[0]
+                g1 = c1[1]
+                b1 = c1[2]
+
+                if c0_packed > c1_packed:
+                    c2 = (
+                        (2 * r0 + r1) // 3,
+                        (2 * g0 + g1) // 3,
+                        (2 * b0 + b1) // 3,
+                        255,
+                    )
+                    c3 = (
+                        (r0 + 2 * r1) // 3,
+                        (g0 + 2 * g1) // 3,
+                        (b0 + 2 * b1) // 3,
+                        255,
+                    )
+                else:
+                    c2 = ((r0 + r1) // 2, (g0 + g1) // 2, (b0 + b1) // 2, 255)
+                    c3 = (0, 0, 0, 255)
+
+                for j in range(4):
+                    for i in range(4):
+                        code = (ctable >> (2 * (4 * i + j))) & 0x03
+                        x = (col * 4) + j
+                        y = (row * 4) + i
+                        idx = (y * self.width + x) * 4
+                        color = [c0, c1, c2, c3][code]
+                        self.texels[idx + 0] = color[0]
+                        self.texels[idx + 1] = color[1]
+                        self.texels[idx + 2] = color[2]
+                        self.texels[idx + 3] = color[3]
 
 
 class Vector3(ctypes.Structure):
@@ -1482,7 +1603,6 @@ in VS_OUT {
 } fs_in;
 
 uniform vec4 u_color;
-uniform float u_alpha;
 
 uniform sampler2D u_diffuse;
 uniform bool u_use_diffuse;
@@ -1496,7 +1616,7 @@ void main() {
     }
 
     vec3 color = map_color.rgb * fs_in.color;
-    frag_color = vec4(color.rgb, map_color.a * u_alpha) * u_color;
+    frag_color = vec4(color.rgb, map_color.a) * u_color;
 }
 """
 
@@ -1551,7 +1671,7 @@ CUBE_INDICES = [
 
 
 class PssgViewerFrame(wx.Frame):
-    class PssgSceneShader:
+    class SceneShader:
         @dataclass
         class Uniform:
             name: str
@@ -1605,6 +1725,44 @@ class PssgViewerFrame(wx.Frame):
             GL.glDeleteProgram(self.handle)
             self.handle = None
 
+        def bind(self):
+            GL.glUseProgram(self.handle)
+
+        def set_flag(self, name: str, value: bool):
+            GL.glUniform1i(self._get_typed_uniform_location(name, GL.GL_BOOL), value)
+
+        def set_int(self, name: str, value: int):
+            GL.glUniform1i(self._get_typed_uniform_location(name, GL.GL_INT), value)
+
+        def set_float(self, name: str, value: float):
+            GL.glUniform1f(self._get_typed_uniform_location(name, GL.GL_FLOAT), value)
+
+        def set_vector2(self, name: str, value: tuple[float, float]):
+            GL.glUniform2fv(
+                self._get_typed_uniform_location(name, GL.GL_FLOAT_VEC2), 1, value
+            )
+
+        def set_vector3(self, name: str, value: tuple[float, float, float]):
+            GL.glUniform3fv(
+                self._get_typed_uniform_location(name, GL.GL_FLOAT_VEC3), 1, value
+            )
+
+        def set_vector4(self, name: str, value: tuple[float, float, float, float]):
+            GL.glUniform4fv(
+                self._get_typed_uniform_location(name, GL.GL_FLOAT_VEC4), 1, value
+            )
+
+        def set_matrix(self, name: str, value: Matrix4x4):
+            GL.glUniformMatrix4fv(
+                self._get_typed_uniform_location(name, GL.GL_FLOAT_MAT4),
+                1,
+                True,
+                value.values,
+            )
+
+        def set_sampler(self, name: str, value: int):
+            GL.glUniform1i(self._get_typed_uniform_location(name, GL.GL_SAMPLER_2D), value)
+
         @classmethod
         def _compile_shader(cls, type, source: str):
             handle = GL.glCreateShader(type)
@@ -1633,15 +1791,33 @@ class PssgViewerFrame(wx.Frame):
                     name_str, size, gl_type, location
                 )
 
-    class PssgSceneTexture:
+        def _get_typed_uniform_location(self, name: str, gl_type):
+            uniform = self.uniforms[name]
+            if uniform is not None:
+                if uniform.gl_type == gl_type:
+                    return uniform.location
+
+            raise Exception(f"uniform {name} does not exist with given type")
+
+    class SceneTexture:
         width: int
         height: int
-        pixels: bytes
+        levels: int
+        pixels: Optional[bytearray]
 
-        def __init__(self, width: int, height: int, pixels: bytes):
+        def __init__(
+            self,
+            width: int,
+            height: int,
+            format,
+            levels: int = 1,
+            pixels: Optional[bytearray] = None,
+        ):
             self.width = width
             self.height = height
+            self.format = format
             self.pixels = pixels
+            self.levels = levels
             self.handle = None
 
         def start(self):
@@ -1655,30 +1831,109 @@ class PssgViewerFrame(wx.Frame):
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_REPEAT)
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-            GL.glTexImage2D(
-                GL.GL_TEXTURE_2D,
-                0,
-                GL.GL_RGBA,
-                self.width,
-                self.height,
-                0,
-                GL.GL_RGBA8,
-                GL.GL_UNSIGNED_BYTE,
-                self.pixels,
-            )
+
+            if self.pixels is not None:
+                GL.glTexImage2D(
+                    GL.GL_TEXTURE_2D,
+                    0,
+                    self.format,
+                    self.width,
+                    self.height,
+                    0,
+                    GL.GL_RGBA,
+                    GL.GL_UNSIGNED_BYTE,
+                    self.pixels,
+                )
+
+                if self.levels > 1:
+                    GL.glGenerateTextureMipmap(GL.GL_TEXTURE_2D)
+            else:
+                level_width = self.width
+                level_height = self.height
+                for level in range(self.levels):
+                    pixformat, pixtype = self._get_format_and_type(self.format)
+                    GL.glTexImage2D(
+                        GL.GL_TEXTURE_2D,
+                        level,
+                        self.format,
+                        level_width,
+                        level_height,
+                        0,
+                        pixformat,
+                        pixtype,
+                        None,
+                    )
+                    level_width = max(1, level_width // 2)
+                    level_height = max(1, level_height // 2)
+
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
 
         def destroy(self):
             GL.glDeleteTextures(self.handle)
             self.handle = None
 
-    class PssgSceneMesh:
+        def bind(self, slot: int):
+            GL.glActiveTexture(int(GL.GL_TEXTURE0) + slot)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self.handle)
+
+        @classmethod
+        def _get_format_and_type(cls, internal_format):
+            # fmt: off
+            mapping = {
+                GL.GL_R8:                 (GL.GL_RED,  GL.GL_UNSIGNED_BYTE),
+                GL.GL_R16:                (GL.GL_RED,  GL.GL_UNSIGNED_SHORT),
+                GL.GL_R16F:               (GL.GL_RED,  GL.GL_FLOAT),
+                GL.GL_R32F:               (GL.GL_RED,  GL.GL_FLOAT),
+                GL.GL_RG8:                (GL.GL_RG,   GL.GL_UNSIGNED_BYTE),
+                GL.GL_RG16:               (GL.GL_RG,   GL.GL_UNSIGNED_SHORT),
+                GL.GL_RG16F:              (GL.GL_RG,   GL.GL_FLOAT),
+                GL.GL_RG32F:              (GL.GL_RG,   GL.GL_FLOAT),
+                GL.GL_RGB8:               (GL.GL_RGB,  GL.GL_UNSIGNED_BYTE),
+                GL.GL_RGB16:              (GL.GL_RGB,  GL.GL_UNSIGNED_SHORT),
+                GL.GL_RGB16F:             (GL.GL_RGB,  GL.GL_FLOAT),
+                GL.GL_RGB32F:             (GL.GL_RGB,  GL.GL_FLOAT),
+                GL.GL_SRGB8:              (GL.GL_RGB,  GL.GL_UNSIGNED_BYTE),
+                GL.GL_RGBA8:              (GL.GL_RGBA, GL.GL_UNSIGNED_BYTE),
+                GL.GL_RGBA16:             (GL.GL_RGBA, GL.GL_UNSIGNED_SHORT),
+                GL.GL_RGBA16F:            (GL.GL_RGBA, GL.GL_FLOAT),
+                GL.GL_RGBA32F:            (GL.GL_RGBA, GL.GL_FLOAT),
+                GL.GL_SRGB8_ALPHA8:       (GL.GL_RGBA, GL.GL_UNSIGNED_BYTE),
+                GL.GL_DEPTH_COMPONENT16:  (GL.GL_DEPTH_COMPONENT, GL.GL_UNSIGNED_SHORT),
+                GL.GL_DEPTH_COMPONENT24:  (GL.GL_DEPTH_COMPONENT, GL.GL_UNSIGNED_INT),
+                GL.GL_DEPTH_COMPONENT32F: (GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT),
+                GL.GL_DEPTH24_STENCIL8:   (GL.GL_DEPTH_STENCIL, GL.GL_UNSIGNED_INT_24_8),
+            }
+            # fmt: on
+
+            return mapping[internal_format]
+
+    class SceneMesh:
+        @dataclass
+        class LayoutElement:
+            index: int
+            size: int
+            gl_type: GL.Constant
+            stride: int
+            offset: int
+
+        FLOAT_SIZE = ctypes.sizeof(ctypes.c_float)
+        POS_UV_COLOR_NORMAL_LAYOUT = [
+            LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 0),
+            LayoutElement(1, 2, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 3),
+            LayoutElement(2, 3, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 5),
+            LayoutElement(3, 3, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 8),
+        ]
+
         def __init__(
             self,
+            layout: list[LayoutElement],
             vertices: ctypes.Array[ctypes.c_float],
             indices: ctypes.Array[ctypes.c_uint32],
         ):
+            self.layout = layout
             self.vertices = vertices
             self.indices = indices
+            self.num_indices = len(self.indices)
 
             self.vertex_buffer = None
             self.index_buffer = None
@@ -1689,41 +1944,34 @@ class PssgViewerFrame(wx.Frame):
                 raise Exception("mesh already started")
 
             self.handle = GL.glGenVertexArrays(1)
-
-            vertex_stride = ctypes.sizeof(ctypes.c_float) * 11
-            vertex_pos_offset = 0
-            vertex_uv_offset = ctypes.sizeof(ctypes.c_float) * 3
-            vertex_color_offset = ctypes.sizeof(ctypes.c_float) * 5
-            vertex_normal_offset = ctypes.sizeof(ctypes.c_float) * 8
-
             GL.glBindVertexArray(self.handle)
 
             self.vertex_buffer = GL.glGenBuffers(1)
             self.index_buffer = GL.glGenBuffers(1)
-            
+
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vertex_buffer)
-            GL.glBufferData(
-                GL.GL_ARRAY_BUFFER, self.vertices, GL.GL_STATIC_DRAW
-            )
-            GL.glVertexAttribPointer(
-                0, 3, GL.GL_FLOAT, False, vertex_stride, ctypes.c_void_p(vertex_pos_offset)
-            )
-            GL.glEnableVertexAttribArray(0)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, self.vertices, GL.GL_STATIC_DRAW)
 
-            GL.glVertexAttribPointer(
-                1, 2, GL.GL_FLOAT, False, vertex_stride, ctypes.c_void_p(vertex_uv_offset)
-            )
-            GL.glEnableVertexAttribArray(1)
-
-            GL.glVertexAttribPointer(
-                2, 3, GL.GL_FLOAT, False, vertex_stride, ctypes.c_void_p(vertex_color_offset)
-            )
-            GL.glEnableVertexAttribArray(2)
-
-            GL.glVertexAttribPointer(
-                3, 3, GL.GL_FLOAT, False, vertex_stride, ctypes.c_void_p(vertex_normal_offset)
-            )
-            GL.glEnableVertexAttribArray(3)
+            for layout_element in self.layout:
+                match layout_element.gl_type:
+                    case GL.GL_INT | GL.GL_UNSIGNED_INT:
+                        GL.glVertexAttribIPointer(
+                            layout_element.index,
+                            layout_element.size,
+                            layout_element.gl_type,
+                            layout_element.stride,
+                            ctypes.c_void_p(layout_element.offset),
+                        )
+                    case _:
+                        GL.glVertexAttribPointer(
+                            layout_element.index,
+                            layout_element.size,
+                            layout_element.gl_type,
+                            False,
+                            layout_element.stride,
+                            ctypes.c_void_p(layout_element.offset),
+                        )
+                GL.glEnableVertexAttribArray(layout_element.index)
 
             GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
             GL.glBufferData(
@@ -1743,6 +1991,12 @@ class PssgViewerFrame(wx.Frame):
             self.vertex_buffer = None
             self.index_buffer = None
 
+        def draw(self):
+            GL.glBindVertexArray(self.handle)
+            GL.glDrawElements(
+                GL.GL_TRIANGLES, self.num_indices, GL.GL_UNSIGNED_INT, None
+            )
+
     class PssgSceneNode:
         translation: Vector3 = Vector3.zero()
         rotation: Quaternion = Quaternion.identity()
@@ -1753,7 +2007,7 @@ class PssgViewerFrame(wx.Frame):
 
     class PssgViewerCanvas(glcanvas.GLCanvas):
         center: Vector3 = Vector3.zero()
-        distance: float = 10.0
+        distance: float = 5.0
         azimuth: float = 0.0
         elevation: float = 0.0
 
@@ -1761,7 +2015,7 @@ class PssgViewerFrame(wx.Frame):
         view_matrix: Matrix4x4 = Matrix4x4.identity()
         proj_matrix: Matrix4x4 = Matrix4x4.identity()
 
-        def __init__(self, parent):
+        def __init__(self, parent, element: PssgElement):
             gl_attrib_list: list[int] = [
                 glcanvas.WX_GL_CORE_PROFILE,
                 glcanvas.WX_GL_MAJOR_VERSION,
@@ -1779,18 +2033,53 @@ class PssgViewerFrame(wx.Frame):
 
             self.gl_context = glcanvas.GLContext(self)
             self.gl_initialized = False
+            self.prev_mouse_position: Optional[wx.Point] = None
 
             self.Bind(wx.EVT_SIZE, self.on_resize_viewport)
             self.Bind(wx.EVT_PAINT, self.on_paint)
+            self.Bind(wx.EVT_MOTION, self.on_mouse_motion)
+            self.Bind(wx.EVT_MOUSEWHEEL, self.on_mouse_scroll)
 
-            self.gl_shader_program = PssgViewerFrame.PssgSceneShader(
+            self.gl_shader_program = PssgViewerFrame.SceneShader(
                 vs_source=VERTEX_SHADER, fs_source=FRAGMENT_SHADER
             )
-
-            self.gl_mesh = PssgViewerFrame.PssgSceneMesh(
+            self.gl_mesh = PssgViewerFrame.SceneMesh(
+                PssgViewerFrame.SceneMesh.POS_UV_COLOR_NORMAL_LAYOUT,
                 (ctypes.c_float * len(CUBE_VERTICES))(*CUBE_VERTICES),
                 (ctypes.c_uint32 * len(CUBE_INDICES))(*CUBE_INDICES),
             )
+
+            pssg_texture = pssg_find_texture_block(element, "MOB39A_face00.dds")
+            if pssg_texture is None:
+                raise Exception("texture not found")
+
+            decoded = PssgDecodedTexture(pssg_texture)
+            self.gl_texture = PssgViewerFrame.SceneTexture(
+                decoded.width, decoded.height, GL.GL_RGBA8, 1, decoded.texels
+            )
+
+        def on_mouse_scroll(self, event: wx.MouseEvent):
+            delta = event.GetWheelRotation() / event.GetWheelDelta()
+            self.distance = self.distance - delta * 0.05
+
+        def on_mouse_motion(self, event: wx.MouseEvent):
+            current_mouse_pos = event.GetPosition()
+            if event.Dragging() and event.LeftIsDown():
+                if self.prev_mouse_position is None:
+                    self.prev_mouse_position = current_mouse_pos
+                    return
+
+                delta_x = current_mouse_pos.x - self.prev_mouse_position.x
+                delta_y = current_mouse_pos.y - self.prev_mouse_position.y
+                self.prev_mouse_position = current_mouse_pos
+
+                delta_yaw = delta_x / 300.0
+                delta_pitch = delta_y / 300.0
+
+                self.elevation = self.elevation - delta_pitch
+                self.azimuth = self.azimuth - delta_yaw
+            else:
+                self.prev_mouse_position = None
 
         def on_resize_viewport(self, event: wx.SizeEvent):
             event.Skip()
@@ -1815,20 +2104,27 @@ class PssgViewerFrame(wx.Frame):
             self.view_matrix = Matrix4x4.translation(-self.center)
             self.view_matrix = Matrix4x4.rotation_y(-self.azimuth) * self.view_matrix
             self.view_matrix = Matrix4x4.rotation_x(-self.elevation) * self.view_matrix
-            self.view_matrix = Matrix4x4.translation(Vector3(0, 0, -self.distance)) * self.view_matrix
-            self.proj_matrix = Matrix4x4.perspective(vp_size.width / vp_size.height, math.pi * 0.5, 0.5, 100.0)
+            self.view_matrix = (
+                Matrix4x4.translation(Vector3(0, 0, -self.distance)) * self.view_matrix
+            )
+            self.proj_matrix = Matrix4x4.perspective(
+                vp_size.width / vp_size.height, math.pi * 0.5, 0.5, 100.0
+            )
 
             GL.glEnable(GL.GL_DEPTH_TEST)
             GL.glViewport(0, 0, vp_size.width, vp_size.height)
             GL.glClearColor(0.207, 0.36, 0.64, 1)
             GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
 
-            GL.glUseProgram(self.gl_shader_program.handle)
-            GL.glBindVertexArray(self.gl_mesh.handle)
-            GL.glUniformMatrix4fv(self.gl_shader_program.uniforms["u_world"].location, 1, True, self.world_matrix.values)
-            GL.glUniformMatrix4fv(self.gl_shader_program.uniforms["u_view"].location, 1, True, self.view_matrix.values)
-            GL.glUniformMatrix4fv(self.gl_shader_program.uniforms["u_projection"].location, 1, True, self.proj_matrix.values)
-            GL.glDrawElements(GL.GL_TRIANGLES, len(CUBE_INDICES), GL.GL_UNSIGNED_INT, None)
+            self.gl_texture.bind(0)
+            self.gl_shader_program.bind()
+            self.gl_shader_program.set_matrix("u_world", self.world_matrix)
+            self.gl_shader_program.set_matrix("u_view", self.view_matrix)
+            self.gl_shader_program.set_matrix("u_projection", self.proj_matrix)
+            self.gl_shader_program.set_vector4("u_color", (1.0, 1.0, 1.0, 1.0))
+            self.gl_shader_program.set_flag("u_use_diffuse", True)
+            self.gl_shader_program.set_sampler("u_diffuse", 0)
+            self.gl_mesh.draw()
 
             self.SwapBuffers()
 
@@ -1841,10 +2137,11 @@ class PssgViewerFrame(wx.Frame):
 
                 self.gl_shader_program.start()
                 self.gl_mesh.start()
+                self.gl_texture.start()
 
                 logging.info(self.gl_shader_program.uniforms)
 
-    def __init__(self, title):
+    def __init__(self, title: str, element: PssgElement):
         wx.Frame.__init__(
             self,
             None,
@@ -1854,7 +2151,8 @@ class PssgViewerFrame(wx.Frame):
             style=wx.DEFAULT_FRAME_STYLE | wx.NO_FULL_REPAINT_ON_RESIZE,
         )
 
-        self.canvas = self.PssgViewerCanvas(self)
+        self.element = element
+        self.canvas = self.PssgViewerCanvas(self, self.element)
 
         menu_bar = wx.MenuBar()
         file_menu = wx.Menu()
@@ -1872,11 +2170,18 @@ class PssgViewerFrame(wx.Frame):
         sizer.Add(self.canvas, 1, wx.EXPAND)
         self.SetSizer(sizer)
 
-        self.Bind(wx.EVT_CLOSE, self.OnClose)
-        self.Bind(wx.EVT_MENU, self.OnClose, file_menu_exit)
+        self.timer = wx.Timer(self)
+        self.timer.Start(16)
 
-    def OnClose(self, event: wx.Event):
+        self.Bind(wx.EVT_CLOSE, self.on_close)
+        self.Bind(wx.EVT_MENU, self.on_close, file_menu_exit)
+        self.Bind(wx.EVT_TIMER, self.on_timer)
+
+    def on_close(self, event: wx.Event):
         self.Destroy()
+
+    def on_timer(self, event: wx.TimerEvent):
+        self.canvas.on_render()
 
 
 class PssgJsonEncoder(json.JSONEncoder):
@@ -1921,7 +2226,7 @@ def main() -> int:
             logging.info("found pssg schema attribute %s", pssg_schema_attrib)
 
         viewer_app = wx.App()
-        viewer_app_frame = PssgViewerFrame(input_filename)
+        viewer_app_frame = PssgViewerFrame(input_filename, pssg_reader.pssg_tree)
         viewer_app_frame.Show()
         viewer_app.MainLoop()
 
