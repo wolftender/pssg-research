@@ -2168,6 +2168,10 @@ class PssgModelTree:
                     count=data_block_element_count,
                 )
 
+        # fill with color white
+        for i in range(num_vertices):
+            struct.pack_into("<3f", vertex_buffer, i * VERTEX_STRIDE + COLOR_OFFSET, 1.0, 1.0, 1.0)
+
         node.vertex_buffer = vertex_buffer
         node.num_vertices = num_vertices
         node.index_buffer = bytearray(UINT_SIZE * indices_count)
@@ -2737,6 +2741,7 @@ class PssgViewerFrame(wx.Frame):
 
             vp_size = self.GetClientSize()
 
+            self.world_matrix = Matrix4x4.scale(Vector3(0.01, 0.01, 0.01))
             self.view_matrix = Matrix4x4.translation(-self.center)
             self.view_matrix = Matrix4x4.rotation_y(-self.azimuth) * self.view_matrix
             self.view_matrix = Matrix4x4.rotation_x(-self.elevation) * self.view_matrix
