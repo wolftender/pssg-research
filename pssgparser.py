@@ -9,9 +9,9 @@ import ctypes
 import math
 
 from array import array
-from enum import Enum
-from typing import Any, Optional, Union, Iterator, overload
-from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Any, Optional, Union, Iterator, overload, NamedTuple
+from dataclasses import dataclass, field
 
 import wx
 from wx import glcanvas
@@ -187,6 +187,8 @@ BASE_ELEMENT_TYPES: list[PssgBaseElement] = [
     PssgBaseElement("PNSTRING", PssgElementType.NONE),
     PssgBaseElement("NODE", PssgElementType.NONE),
     PssgBaseElement("XXX", PssgElementType.NONE),
+    PssgBaseElement("RISTREAM", PssgElementType.NONE),
+    PssgBaseElement("RENDERINSTANCESTREAM", PssgElementType.NONE),
     PssgBaseElement("RENDERDATASOURCE", PssgElementType.NONE),
     PssgBaseElement("RENDERINDEXSOURCE", PssgElementType.NONE),
     PssgBaseElement("RENDERINSTANCE", PssgElementType.NONE),
@@ -350,6 +352,10 @@ BASE_ATTRIBUTE_TYPES: list[PssgBaseAttribute] = [
     PssgBaseAttribute("NODE", "stopTraversal", PssgAttributeType.INT),
     PssgBaseAttribute("NODE", "nickname", PssgAttributeType.STRING),
     PssgBaseAttribute("XXX", "id", PssgAttributeType.STRING),
+    PssgBaseAttribute("RISTREAM", "id", PssgAttributeType.INT),
+    PssgBaseAttribute("RISTREAM", "stream", PssgAttributeType.STRING),
+    PssgBaseAttribute("RENDERINSTANCESTREAM", "sourceID", PssgAttributeType.INT),
+    PssgBaseAttribute("RENDERINSTANCESTREAM", "streamID", PssgAttributeType.INT),
     PssgBaseAttribute("RENDERDATASOURCE", "streamCount", PssgAttributeType.INT),
     PssgBaseAttribute("RENDERDATASOURCE", "packetCount", PssgAttributeType.INT),
     PssgBaseAttribute("RENDERDATASOURCE", "packetListCount", PssgAttributeType.INT),
@@ -936,6 +942,7 @@ class PssgDecodedTexture:
                 f"cannot decode a texture from an element of type {element.name}"
             )
 
+        self.id = str(element.get_attribute("id").value)
         self.width = int(element.get_attribute("width").value)
         self.height = int(element.get_attribute("height").value)
         self.texel_format = str(element.get_attribute("texelFormat").value)
@@ -1273,6 +1280,49 @@ class Matrix4x4(ctypes.Structure):
         ))
         # fmt: on
 
+    def decompose(self) -> tuple[Vector3, Quaternion, Vector3]:
+        m = self.values
+
+        translation = Vector3(m[3], m[7], m[11])
+
+        # basis vectors
+        col0 = Vector3(m[0], m[4], m[8])
+        col1 = Vector3(m[1], m[5], m[9])
+        col2 = Vector3(m[2], m[6], m[10])
+
+        sx = col0.length()
+        sy = col1.length()
+        sz = col2.length()
+
+        # don't handle degenerated cases
+        if sx == 0 or sy == 0 or sz == 0:
+            return (Vector3.zero(), Quaternion.identity(), Vector3.zero())
+
+        det3x3 = (
+            m[0] * (m[5] * m[10] - m[6] * m[9])
+            - m[1] * (m[4] * m[10] - m[6] * m[8])
+            + m[2] * (m[4] * m[9] - m[5] * m[8])
+        )
+        if det3x3 < 0:
+            sx = -sx
+
+        col0 = col0 * (1 / sx)
+        col1 = col1 * (1 / sy)
+        col2 = col2 * (1 / sz)
+
+        # SO(3) group matrix - det == 1
+        # fmt: off
+        rot_matrix = Matrix4x4((
+            col0.x, col1.x, col2.x, 0,
+            col0.y, col1.y, col2.y, 0,
+            col0.z, col1.z, col2.z, 0,
+            0, 0, 0, 1,
+        ))
+        # fmt: on
+
+        rotation = Quaternion.from_matrix(rot_matrix)
+        return (translation, rotation, Vector3(sx, sy, sz))
+
     def invert(self) -> Matrix4x4:
         m = self.values
         inv = [0.0] * 16
@@ -1568,6 +1618,601 @@ class Quaternion(ctypes.Structure):
         ))
         # fmt: on
 
+    @classmethod
+    def from_matrix(cls, m: Matrix4x4) -> Quaternion:
+        v = m.values
+        m00, m01, m02 = v[0], v[1], v[2]
+        m10, m11, m12 = v[4], v[5], v[6]
+        m20, m21, m22 = v[8], v[9], v[10]
+
+        trace = m00 + m11 + m22
+
+        if trace > 0:
+            s = 0.5 / math.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (m21 - m12) * s
+            y = (m02 - m20) * s
+            z = (m10 - m01) * s
+        elif m00 > m11 and m00 > m22:
+            s = 2.0 * math.sqrt(1.0 + m00 - m11 - m22)
+            w = (m21 - m12) / s
+            x = 0.25 * s
+            y = (m01 + m10) / s
+            z = (m02 + m20) / s
+        elif m11 > m22:
+            s = 2.0 * math.sqrt(1.0 + m11 - m00 - m22)
+            w = (m02 - m20) / s
+            x = (m01 + m10) / s
+            y = 0.25 * s
+            z = (m12 + m21) / s
+        else:
+            s = 2.0 * math.sqrt(1.0 + m22 - m00 - m11)
+            w = (m10 - m01) / s
+            x = (m02 + m20) / s
+            y = (m12 + m21) / s
+            z = 0.25 * s
+
+        return cls(x, y, z, w)
+
+
+class PssgScalarDataType(Enum):
+    FLOAT = ("f", 4)
+    CHAR = ("b", 1)
+    SHORT = ("h", 2)
+    INT = ("i", 4)
+    UCHAR = ("B", 1)
+    USHORT = ("H", 2)
+    UINT = ("I", 4)
+
+
+class PssgArrayBufferType(Enum):
+    FLOAT = (PssgScalarDataType.FLOAT, 1)
+    FLOAT2 = (PssgScalarDataType.FLOAT, 2)
+    FLOAT3 = (PssgScalarDataType.FLOAT, 3)
+    FLOAT4 = (PssgScalarDataType.FLOAT, 4)
+    CHAR = (PssgScalarDataType.CHAR, 1)
+    CHAR2 = (PssgScalarDataType.CHAR, 2)
+    CHAR3 = (PssgScalarDataType.CHAR, 3)
+    CHAR4 = (PssgScalarDataType.CHAR, 4)
+    SHORT = (PssgScalarDataType.SHORT, 1)
+    SHORT2 = (PssgScalarDataType.SHORT, 2)
+    SHORT3 = (PssgScalarDataType.SHORT, 3)
+    SHORT4 = (PssgScalarDataType.SHORT, 4)
+    INT = (PssgScalarDataType.INT, 1)
+    INT2 = (PssgScalarDataType.INT, 2)
+    INT3 = (PssgScalarDataType.INT, 3)
+    INT4 = (PssgScalarDataType.INT, 4)
+    UCHAR = (PssgScalarDataType.UCHAR, 1)
+    UCHAR2 = (PssgScalarDataType.UCHAR, 2)
+    UCHAR3 = (PssgScalarDataType.UCHAR, 3)
+    UCHAR4 = (PssgScalarDataType.UCHAR, 4)
+    USHORT = (PssgScalarDataType.USHORT, 1)
+    USHORT2 = (PssgScalarDataType.USHORT, 2)
+    USHORT3 = (PssgScalarDataType.USHORT, 3)
+    USHORT4 = (PssgScalarDataType.USHORT, 4)
+    UINT = (PssgScalarDataType.UINT, 1)
+    UINT2 = (PssgScalarDataType.UINT, 2)
+    UINT3 = (PssgScalarDataType.UINT, 3)
+    UINT4 = (PssgScalarDataType.UINT, 4)
+
+
+PSSG_KNOWN_ARRAY_TYPES = {
+    "float": PssgArrayBufferType.FLOAT,
+    "float2": PssgArrayBufferType.FLOAT2,
+    "float3": PssgArrayBufferType.FLOAT3,
+    "float4": PssgArrayBufferType.FLOAT4,
+    "uchar": PssgArrayBufferType.UCHAR,
+    "uchar2": PssgArrayBufferType.UCHAR2,
+    "uchar3": PssgArrayBufferType.UCHAR3,
+    "uchar4": PssgArrayBufferType.UCHAR4,
+    "ushort": PssgArrayBufferType.USHORT,
+    "ushort2": PssgArrayBufferType.USHORT2,
+    "ushort3": PssgArrayBufferType.USHORT3,
+    "ushort4": PssgArrayBufferType.USHORT4,
+}
+
+
+def pssg_transmute_buffer(
+    src_data: bytearray,
+    src_type: PssgArrayBufferType,
+    src_stride: int,
+    src_offset: int,
+    dst_data: bytearray,
+    dst_type: PssgArrayBufferType,
+    dst_offset: int,
+    dst_stride: int,
+    count: int,
+    src_endian: str = ">",  # ps3 source data is big endian
+    dst_endian: str = "<",  # assume little endian destination
+):
+    def _is_integer_type(st: PssgScalarDataType) -> bool:
+        return st in (
+            PssgScalarDataType.INT,
+            PssgScalarDataType.UINT,
+            PssgScalarDataType.SHORT,
+            PssgScalarDataType.USHORT,
+            PssgScalarDataType.CHAR,
+            PssgScalarDataType.UCHAR,
+        )
+
+    def _is_unsigned_type(st: PssgScalarDataType) -> bool:
+        return st in (
+            PssgScalarDataType.UINT,
+            PssgScalarDataType.USHORT,
+            PssgScalarDataType.UCHAR,
+        )
+
+    def _is_float_type(st: PssgScalarDataType) -> bool:
+        return st == PssgScalarDataType.FLOAT
+
+    def _convert_scalar(
+        value, src_base_type: PssgScalarDataType, dst_base_type: PssgScalarDataType
+    ):
+        # same type is noop
+        if src_base_type == dst_base_type:
+            return value
+
+        # float to int use round()
+        if _is_float_type(src_base_type) and _is_integer_type(dst_base_type):
+            v = round(value)
+            return max(0, v) if _is_unsigned_type(dst_base_type) else v
+
+        # int to float use casting
+        if _is_integer_type(src_base_type) and _is_float_type(dst_base_type):
+            return float(value)
+
+        # widen integers
+        if _is_integer_type(src_base_type) and _is_integer_type(dst_base_type):
+            return int(value)
+
+        raise NotImplementedError(
+            f"No conversion rule from {src_base_type.value} to {dst_base_type.value}"
+        )
+
+    src_scalar_type, src_components = src_type.value
+    src_code, src_byte_width = src_scalar_type.value
+
+    dst_scalar_type, dst_components = dst_type.value
+    dst_code, dst_byte_width = dst_scalar_type.value
+
+    pad_value = 0.0 if _is_float_type(src_scalar_type) else 0
+
+    if src_stride == 0:
+        src_stride = src_byte_width * src_components
+
+    if dst_stride == 0:
+        dst_stride = dst_byte_width * dst_components
+
+    for i in range(count):
+        src_ptr = src_offset + i * src_stride
+        dst_ptr = dst_offset + i * dst_stride
+
+        src_values = list(
+            struct.unpack_from(
+                f"{src_endian}{src_components}{src_code}", src_data, src_ptr
+            )
+        )
+
+        if dst_components > src_components:
+            src_values = src_values + [pad_value] * (dst_components - len(src_values))
+        elif dst_components < len(src_values):
+            src_values = src_values[:dst_components]
+
+        dst_values = [
+            _convert_scalar(v, src_scalar_type, dst_scalar_type) for v in src_values
+        ]
+
+        struct.pack_into(
+            f"{dst_endian}{dst_components}{dst_code}", dst_data, dst_ptr, *dst_values
+        )
+
+
+class PssgModelTree:
+    @dataclass
+    class PssgModelNode:
+        id: str
+        translation: Vector3 = Vector3.zero()
+        scale: Vector3 = Vector3(1, 1, 1)
+        rotation: Quaternion = Quaternion.identity()
+
+        bounding_min: Vector3 = Vector3.zero()
+        bounding_max: Vector3 = Vector3.zero()
+
+        children: list[PssgModelTree.PssgModelNode] = field(default_factory=list)
+
+    @dataclass
+    class PssgModelRenderNode(PssgModelNode):
+        vertex_buffer: bytearray = field(default_factory=bytearray)
+        index_buffer: bytearray = field(default_factory=bytearray)
+        num_vertices: int = 0
+        num_indices: int = 0
+        texture: Optional[PssgDecodedTexture] = None
+
+    NODE_TYPES = ["NODE", "ROOTNODE", "RENDERNODE"]
+
+    pssg_libraries: list[PssgElement] = []
+    pssg_model: PssgElement
+    pssg_buffer_library: PssgElement
+    pssg_source_library: PssgElement
+    pssg_material_library: PssgElement
+    pssg_node_library: PssgElement
+    pssg_skeleton_library: PssgElement
+
+    root: PssgModelNode
+    textures: dict[str, PssgDecodedTexture] = {}
+    rendernodes: dict[str, PssgModelRenderNode] = {}
+
+    def __init__(self, element: PssgElement):
+        if element.name != "PSSGDATABASE":
+            raise Exception(f"expected pssg PSSGDATABASE element, got {element.type}")
+
+        self.pssg_model = element
+
+        """
+        pssg files have "libraries", they basically are like file sections dedicated
+        to different things to be put there
+
+        ``RENDERINTERFACEBOUND`` - this is basically raw (typed) buffer data, e.g. it
+        may hold float3 data for positions and normals, or dxt1 compressed texels
+
+        ``SHADERINSTANCE`` - as the name suggests, instances of shaders, basically
+        the important part for us are the shader inputs defined in this section as 
+        this is how textures are bound to meshes
+
+        ``RENDERDATASOURCE`` - defines "streams", basically this is very similar to 
+        gltf accessors more or less, of course it is also overcomplicated
+
+        ``NODE`` - scene nodes, basically what you would expect, a hierarchy of
+        different kinds of nodes
+        """
+
+        self.pssg_buffer_library = self._find_library("RENDERINTERFACEBOUND")
+        self.pssg_source_library = self._find_library("RENDERDATASOURCE")
+        self.pssg_node_library = self._find_library("NODE")
+        self.pssg_material_library = self._find_library("SHADERINSTANCE")
+        self.pssg_skeleton_library = self._find_library("SKELETON")
+
+        pssg_root = self.pssg_node_library.find_child("ROOTNODE")
+        if pssg_root is None:
+            raise Exception("ROOTNODE was not found in the node library")
+
+        self.root = self._parse_pssg_node(pssg_root)
+
+    def _parse_pssg_node(self, node: PssgElement) -> PssgModelNode:
+        """
+        there are different types of nodes here to parse
+
+        ``ROOTNODE`` - there should be only one, the first one
+        ``NODE`` - just a regular named node with transform, bbox etc
+        ``RENDERNODE`` - this node has something to be rendered
+
+        we have to decide here, what kind of node this is and how to parse it
+        """
+
+        match node.name:
+            case "NODE" | "ROOTNODE":
+                return self._parse_pssg_regular_node(node)
+
+            case "RENDERNODE":
+                return self._parse_pssg_render_node(node)
+
+            case _:
+                raise Exception(f"unknown node type {node.name}")
+
+    def _parse_pssg_node_base(
+        self, node: PssgElement, child: PssgElement, result: PssgModelNode
+    ) -> bool:
+        if child.name in self.NODE_TYPES:
+            result.children.append(self._parse_pssg_node(child))
+            return True
+        elif child.name == "TRANSFORM":
+            transform_matrix = Matrix4x4(child.value)
+            translation, rotation, scale = transform_matrix.decompose()
+
+            result.translation = translation
+            result.rotation = rotation
+            result.scale = scale
+
+            return True
+        elif child.name == "BOUNDINGBOX":
+            result.bounding_min = Vector3(
+                child.value[0], child.value[1], child.value[2]
+            )
+            result.bounding_max = Vector3(
+                child.value[3], child.value[4], child.value[5]
+            )
+            return True
+
+        return False
+
+    def _parse_pssg_regular_node(self, node: PssgElement) -> PssgModelNode:
+        node_id = node.get_attribute("id").value
+        result = self.PssgModelNode(id=node_id)
+
+        for child in node.children:
+            if not self._parse_pssg_node_base(node, child, result):
+                logging.warning("unhandled node type %s", child.name)
+
+        return result
+
+    def _find_pssg_render_data_source(self, id: str) -> Optional[PssgElement]:
+        for child in self.pssg_source_library.children:
+            if child.name != "RENDERDATASOURCE":
+                pass
+
+            data_source_id = str(child.get_attribute("id").value)
+            if data_source_id == id:
+                return child
+
+        return None
+
+    def _find_pssg_shader_instance(self, id: str) -> Optional[PssgElement]:
+        for child in self.pssg_material_library.children:
+            if child.name != "SHADERINSTANCE":
+                pass
+
+            shader_instance_id = str(child.get_attribute("id").value)
+            if shader_instance_id == id:
+                return child
+
+        return None
+
+    def _find_pssg_data_block(self, id: str) -> Optional[PssgElement]:
+        for child in self.pssg_buffer_library.children:
+            if child.name != "DATABLOCK":
+                pass
+
+            data_block_id = str(child.get_attribute("id").value)
+            if data_block_id == id:
+                return child
+
+        return None
+
+    def _find_pssg_texture(self, id: str) -> Optional[PssgElement]:
+        textures = self.pssg_buffer_library.find_children("TEXTURE")
+        for texture in textures:
+            texture_id = texture.find_attribute("id")
+            if texture_id is None:
+                continue
+
+            if texture_id.value == id:
+                return texture
+
+    def _parse_pssg_render_stream_instance(
+        self, node: PssgModelRenderNode, element: PssgElement
+    ):
+        """
+        simple explaination of different nodes found in this place
+
+        ``RISTREAM`` sets an alias "id" to "stream"
+        ``RENDERINSTANCESOURCE`` links this to a ``RENDERDATASOURCE`` node
+        ``RENDERINSTANCESTREAM`` binds the stream, aliased by ``RISTREAM``
+        """
+
+        shader_instance_id = element.get_attribute("shader")
+        stream_count = int(element.get_attribute("streamCount").value)
+        index_source = str(element.get_attribute("indices").value)
+        source_count = int(element.get_attribute("sourceCount").value)
+
+        if source_count != 1:
+            raise Exception(f"source count is {source_count}, expected 1")
+
+        stream_aliases = {}
+        bound_streams = []
+
+        instance_source: Optional[str] = None
+
+        for child in element.children:
+            match child.name:
+                case "RISTREAM":
+                    id = str(child.get_attribute("id").value)
+                    stream = str(child.get_attribute("stream").value)
+                    stream_aliases[id] = stream
+
+                case "RENDERINSTANCESOURCE":
+                    source = str(child.get_attribute("source").value)
+                    instance_source = source
+
+                case "RENDERINSTANCESTREAM":
+                    source_id = str(child.get_attribute("sourceID").value)
+                    stream_id = str(child.get_attribute("streamID").value)
+                    bound_streams.append(stream_id)
+
+        if instance_source is None:
+            raise Exception("no instance source was specified")
+
+        render_data_source = self._find_pssg_render_data_source(
+            instance_source.lstrip("#")
+        )
+        if render_data_source is None:
+            raise Exception(f"render data source {instance_source} does not exist")
+
+        render_idx_source = render_data_source.find_child("RENDERINDEXSOURCE")
+        if render_idx_source is None:
+            raise Exception(
+                f"render data source {instance_source} does not provide indices"
+            )
+
+        render_indices = render_idx_source.find_child("INDEXSOURCEDATA")
+        if render_indices is None:
+            raise Exception(
+                f"invalid format for render index source in {instance_source}"
+            )
+
+        indices = render_indices.value
+        indices_format = str(render_idx_source.get_attribute("format").value)
+        indices_count = int(render_idx_source.get_attribute("count").value)
+
+        logging.debug("found index buffer of size %d", len(indices))
+
+        shader_instance = self._find_pssg_shader_instance(
+            shader_instance_id.value.lstrip("#")
+        )
+        if shader_instance is None:
+            raise Exception(
+                f"shader instance {shader_instance_id.value} does not exist"
+            )
+
+        # apply texture using shader instance input data
+        shader_inputs = shader_instance.find_children("SHADERINPUT")
+        for shader_input in shader_inputs:
+            input_type = shader_input.get_attribute("type").value
+            if input_type != "texture":
+                pass
+
+            texture_id = shader_input.get_attribute("texture").value.lstrip("#")
+            texture = self._find_pssg_texture(texture_id)
+
+            if texture is None:
+                raise Exception(f"missing texture {texture_id}")
+
+            if texture_id not in self.textures:
+                self.textures[texture_id] = PssgDecodedTexture(texture)
+
+            node.texture = self.textures[texture_id]
+
+        # construct the vertex buffer out of streams
+        render_streams = render_data_source.find_children("RENDERSTREAM")
+
+        FLOAT_SIZE = ctypes.sizeof(ctypes.c_float)
+        UINT_SIZE = ctypes.sizeof(ctypes.c_uint32)
+        VERTEX_STRIDE = FLOAT_SIZE * 11
+        POS_OFFSET = FLOAT_SIZE * 0
+        UV_OFFSET = FLOAT_SIZE * 3
+        COLOR_OFFSET = FLOAT_SIZE * 5
+        NORMAL_OFFSET = FLOAT_SIZE * 8
+
+        LAYOUT_PER_RENDER_TYPE = {
+            "Vertex": (POS_OFFSET, PssgArrayBufferType.FLOAT3),
+            "ST": (UV_OFFSET, PssgArrayBufferType.FLOAT2),
+            "Normal": (NORMAL_OFFSET, PssgArrayBufferType.FLOAT3),
+        }
+
+        vertex_buffer = bytearray()
+        num_vertices = -1
+
+        for bound_stream_id in bound_streams:
+            if bound_stream_id not in stream_aliases:
+                raise Exception(
+                    f"stream with id {bound_stream_id} was not specified using RISTREAM tag"
+                )
+
+            bound_stream_name = stream_aliases[bound_stream_id].lstrip("#")
+            for render_stream in render_streams:
+                if render_stream.get_attribute("id").value != bound_stream_name:
+                    continue
+
+                data_block_name = render_stream.get_attribute("dataBlock").value.lstrip(
+                    "#"
+                )
+                data_block_src = self._find_pssg_data_block(data_block_name)
+                if data_block_src is None:
+                    raise Exception(f"data block {data_block_name} does not exist")
+
+                # data blocks are "typed", thats how we know what vertex attribute this data
+                # block is bound to
+                data_block_name = data_block_src.get_attribute("id").value
+                data_block_element_count = int(
+                    data_block_src.get_attribute("elementCount").value
+                )
+
+                if num_vertices == -1:
+                    vertex_buffer = bytearray(data_block_element_count * VERTEX_STRIDE)
+                    num_vertices = data_block_element_count
+
+                data_block_stream = data_block_src.find_child("DATABLOCKSTREAM")
+                if data_block_stream is None:
+                    raise Exception(
+                        f"data block {data_block_name} does not have any DATABLOCKSTREAM"
+                    )
+
+                data_block_data = data_block_src.find_child("DATABLOCKDATA")
+                if data_block_data is None:
+                    raise Exception(
+                        f"data block {data_block_name} does not have any DATABLOCKDATA"
+                    )
+
+                data_block_render_type = str(
+                    data_block_stream.get_attribute("renderType").value
+                )  # Vertex, Normal, ST
+                data_block_data_type = str(
+                    data_block_stream.get_attribute("dataType").value
+                )  # float3 etc
+                data_block_offset = int(
+                    data_block_stream.get_attribute("offset").value
+                )  # in bytes
+                data_block_stride = int(
+                    data_block_stream.get_attribute("stride").value
+                )  # in bytes
+
+                if data_block_render_type not in LAYOUT_PER_RENDER_TYPE:
+                    logging.warning(
+                        "unsupported render type %s", data_block_render_type
+                    )
+                    continue
+
+                src_type = PSSG_KNOWN_ARRAY_TYPES[data_block_data_type]
+                src_offset = data_block_offset
+                src_stride = data_block_stride
+                dst_offset, dst_type = LAYOUT_PER_RENDER_TYPE[data_block_render_type]
+
+                pssg_transmute_buffer(
+                    src_data=data_block_data.value,
+                    src_type=src_type,
+                    src_stride=src_stride,
+                    src_offset=src_offset,
+                    dst_data=vertex_buffer,
+                    dst_type=dst_type,
+                    dst_stride=VERTEX_STRIDE,
+                    dst_offset=dst_offset,
+                    count=data_block_element_count,
+                )
+
+        node.vertex_buffer = vertex_buffer
+        node.num_vertices = num_vertices
+        node.index_buffer = bytearray(UINT_SIZE * indices_count)
+        node.num_indices = indices_count
+
+        pssg_transmute_buffer(
+            src_data=indices,
+            src_type=PSSG_KNOWN_ARRAY_TYPES[indices_format],
+            src_stride=0,
+            src_offset=0,
+            dst_data=node.index_buffer,
+            dst_type=PssgArrayBufferType.UINT,
+            dst_stride=4,
+            dst_offset=0,
+            count=indices_count,
+        )
+
+    def _parse_pssg_render_node(self, node: PssgElement) -> PssgModelNode:
+        node_id = node.get_attribute("id").value
+        result = self.PssgModelRenderNode(id=node_id)
+
+        for child in node.children:
+            if not self._parse_pssg_node_base(node, child, result):
+                if child.name == "RENDERSTREAMINSTANCE":
+                    self._parse_pssg_render_stream_instance(result, child)
+                else:
+                    logging.warning("unhandled node type %s", child.name)
+
+        self.rendernodes[result.id] = result
+        return result
+
+    def _find_library(self, type: str) -> PssgElement:
+        if len(self.pssg_libraries) == 0:
+            self.pssg_libraries = self.pssg_model.find_children("LIBRARY")
+
+        for library in self.pssg_libraries:
+            library_type = library.find_attribute("type")
+            if library_type is None:
+                continue
+
+            if library_type.value == type:
+                return library
+
+        raise Exception(f"cannot find a pssg library of type {type}")
+
 
 VERTEX_SHADER = """#version 400
 
@@ -1761,7 +2406,9 @@ class PssgViewerFrame(wx.Frame):
             )
 
         def set_sampler(self, name: str, value: int):
-            GL.glUniform1i(self._get_typed_uniform_location(name, GL.GL_SAMPLER_2D), value)
+            GL.glUniform1i(
+                self._get_typed_uniform_location(name, GL.GL_SAMPLER_2D), value
+            )
 
         @classmethod
         def _compile_shader(cls, type, source: str):
@@ -1927,8 +2574,8 @@ class PssgViewerFrame(wx.Frame):
         def __init__(
             self,
             layout: list[LayoutElement],
-            vertices: ctypes.Array[ctypes.c_float],
-            indices: ctypes.Array[ctypes.c_uint32],
+            vertices: ctypes.Array[ctypes.c_float] | bytearray,
+            indices: ctypes.Array[ctypes.c_uint32] | bytearray,
         ):
             self.layout = layout
             self.vertices = vertices
@@ -1997,14 +2644,6 @@ class PssgViewerFrame(wx.Frame):
                 GL.GL_TRIANGLES, self.num_indices, GL.GL_UNSIGNED_INT, None
             )
 
-    class PssgSceneNode:
-        translation: Vector3 = Vector3.zero()
-        rotation: Quaternion = Quaternion.identity()
-        scale: Vector3 = Vector3(1.0, 1.0, 1.0)
-
-        bounding_box_min: Vector3 = Vector3.zero()
-        bounding_box_max: Vector3 = Vector3.zero()
-
     class PssgViewerCanvas(glcanvas.GLCanvas):
         center: Vector3 = Vector3.zero()
         distance: float = 5.0
@@ -2014,6 +2653,10 @@ class PssgViewerFrame(wx.Frame):
         world_matrix: Matrix4x4 = Matrix4x4.identity()
         view_matrix: Matrix4x4 = Matrix4x4.identity()
         proj_matrix: Matrix4x4 = Matrix4x4.identity()
+
+        pssg_tree: PssgModelTree
+        pssg_textures: dict[str, PssgViewerFrame.SceneTexture] = {}
+        pssg_meshes: dict[str, PssgViewerFrame.SceneMesh] = {}
 
         def __init__(self, parent, element: PssgElement):
             gl_attrib_list: list[int] = [
@@ -2049,14 +2692,7 @@ class PssgViewerFrame(wx.Frame):
                 (ctypes.c_uint32 * len(CUBE_INDICES))(*CUBE_INDICES),
             )
 
-            pssg_texture = pssg_find_texture_block(element, "MOB39A_face00.dds")
-            if pssg_texture is None:
-                raise Exception("texture not found")
-
-            decoded = PssgDecodedTexture(pssg_texture)
-            self.gl_texture = PssgViewerFrame.SceneTexture(
-                decoded.width, decoded.height, GL.GL_RGBA8, 1, decoded.texels
-            )
+            self.pssg_tree = PssgModelTree(element)
 
         def on_mouse_scroll(self, event: wx.MouseEvent):
             delta = event.GetWheelRotation() / event.GetWheelDelta()
@@ -2116,7 +2752,7 @@ class PssgViewerFrame(wx.Frame):
             GL.glClearColor(0.207, 0.36, 0.64, 1)
             GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
 
-            self.gl_texture.bind(0)
+            self.pssg_textures["MOB39A_body.dds"].bind(0)
             self.gl_shader_program.bind()
             self.gl_shader_program.set_matrix("u_world", self.world_matrix)
             self.gl_shader_program.set_matrix("u_view", self.view_matrix)
@@ -2126,7 +2762,27 @@ class PssgViewerFrame(wx.Frame):
             self.gl_shader_program.set_sampler("u_diffuse", 0)
             self.gl_mesh.draw()
 
+            self._render_pssg_node(self.pssg_tree.root, self.world_matrix)
             self.SwapBuffers()
+
+        def _render_pssg_node(self, node: PssgModelTree.PssgModelNode, world: Matrix4x4):
+            # T * R * S
+            world = world * Matrix4x4.translation(node.translation)
+            world = world * node.rotation.to_matrix()
+            world = world * Matrix4x4.scale(node.scale)
+
+            if isinstance(node, PssgModelTree.PssgModelRenderNode):
+                pssg_gl_mesh = self.pssg_meshes[node.id]
+
+                if node.texture is not None:
+                    pssg_gl_texture = self.pssg_textures[node.texture.id]
+                    pssg_gl_texture.bind(0)
+
+                self.gl_shader_program.set_matrix("u_world", world)
+                pssg_gl_mesh.draw()
+
+            for child in node.children:
+                self._render_pssg_node(child, world)
 
         def _initialize_if_needed(self):
             if not self.gl_initialized:
@@ -2137,9 +2793,28 @@ class PssgViewerFrame(wx.Frame):
 
                 self.gl_shader_program.start()
                 self.gl_mesh.start()
-                self.gl_texture.start()
+                self._init_pssg_model_resources()
 
                 logging.info(self.gl_shader_program.uniforms)
+
+        def _init_pssg_model_resources(self):
+            for id, rendernode in self.pssg_tree.rendernodes.items():
+                self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
+                    PssgViewerFrame.SceneMesh.POS_UV_COLOR_NORMAL_LAYOUT,
+                    rendernode.vertex_buffer,
+                    rendernode.index_buffer,
+                )
+                self.pssg_meshes[id].start()
+
+            for id, texturenode in self.pssg_tree.textures.items():
+                self.pssg_textures[id] = PssgViewerFrame.SceneTexture(
+                    texturenode.width,
+                    texturenode.height,
+                    GL.GL_RGBA8,
+                    1,
+                    texturenode.texels,
+                )
+                self.pssg_textures[id].start()
 
     def __init__(self, title: str, element: PssgElement):
         wx.Frame.__init__(
@@ -2171,7 +2846,7 @@ class PssgViewerFrame(wx.Frame):
         self.SetSizer(sizer)
 
         self.timer = wx.Timer(self)
-        self.timer.Start(16)
+        self.timer.Start(10)
 
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(wx.EVT_MENU, self.on_close, file_menu_exit)
