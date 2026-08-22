@@ -2195,6 +2195,8 @@ class PssgModelTree:
             if texture_id.value == id:
                 return texture
 
+        return None
+
     def _find_pssg_shader_group(self, id: str) -> Optional[PssgElement]:
         shader_groups = self.pssg_shader_library.find_children("SHADERGROUP")
         for shader_group in shader_groups:
@@ -2204,6 +2206,20 @@ class PssgModelTree:
 
             if shader_group_id.value == id:
                 return shader_group
+
+        return None
+
+    def _find_pssg_skeleton(self, id: str) -> Optional[PssgElement]:
+        skeletons = self.pssg_skeleton_library.find_children("SKELETON")
+        for skeleton in skeletons:
+            skeleton_id = skeleton.find_attribute("id")
+            if skeleton_id is None:
+                continue
+
+            if skeleton_id.value == id:
+                return skeleton
+
+        return None
 
     def _parse_pssg_shader_instance(
         self, node: PssgModelRenderNode, shader_instance: PssgElement
@@ -2492,7 +2508,16 @@ class PssgModelTree:
         self._parse_pssg_shader_instance(result, shader_instance)
         self._parse_pssg_render_data_source(result, render_data_source)
 
-        # TODO parse skin
+        skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
+        skeleton = self._find_pssg_skeleton(skeleton_id)
+        if skeleton is None:
+            raise Exception(f"missing skeleton with id {skeleton_id}")
+
+        skinjoints = node.find_children("SKINJOINT")
+        inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
+
+        if len(skinjoints) != len(inverse_binds):
+            raise Exception(f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices")
 
         self.rendernodes[result.id] = result
         self.skinnednodes[result.id] = result
@@ -2815,7 +2840,7 @@ class PssgViewerFrame(wx.Frame):
             GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
 
         def destroy(self):
-            GL.glDeleteTextures(self.handle)
+            GL.glDeleteTextures(1, [self.handle])
             self.handle = None
 
         def bind(self, slot: int):
@@ -2943,9 +2968,9 @@ class PssgViewerFrame(wx.Frame):
             GL.glBindVertexArray(0)
 
         def destroy(self):
-            GL.glDeleteVertexArrays(self.handle)
-            GL.glDeleteBuffers(self.vertex_buffer)
-            GL.glDeleteBuffers(self.index_buffer)
+            GL.glDeleteVertexArrays(1, [self.handle])
+            GL.glDeleteBuffers(1, [self.vertex_buffer])
+            GL.glDeleteBuffers(1, [self.index_buffer])
 
             self.handle = None
             self.vertex_buffer = None
@@ -3097,6 +3122,18 @@ class PssgViewerFrame(wx.Frame):
 
             self.SwapBuffers()
 
+        def cleanup(self):
+            self.gl_mesh.destroy()
+            self.gl_shader_program.destroy()
+
+            for _, pssg_mesh in self.pssg_meshes.items():
+                pssg_mesh.destroy()
+
+            for _, pssg_texture in self.pssg_textures.items():
+                pssg_texture.destroy()
+
+            self.gl_initialized = False
+
         def _initialize_if_needed(self):
             if not self.gl_initialized:
                 self.gl_version = GL.glGetString(GL.GL_VERSION)
@@ -3209,6 +3246,7 @@ class PssgViewerFrame(wx.Frame):
         self.Bind(wx.EVT_TIMER, self.on_timer)
 
     def on_close(self, event: wx.Event):
+        self.canvas.cleanup()
         self.Destroy()
 
     def on_timer(self, event: wx.TimerEvent):
