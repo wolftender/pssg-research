@@ -2647,11 +2647,32 @@ QUAD_INDICES = [
     2, 3, 0,
 ]
 
-MATRIX_ORIENT_X_UP = Matrix4x4((
+MATRIX_ORIENT_Z_UP = Matrix4x4((
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 1.0, 0.0,
     1.0, 0.0, 0.0, 0.0,
     0.0, 0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_Z_UP_180 = Matrix4x4((
+     0.0, -1.0, 0.0, 0.0,
+     0.0,  0.0, 1.0, 0.0,
+    -1.0,  0.0, 0.0, 0.0,
+     0.0,  0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_Z_UP_90 = Matrix4x4((
+    -1.0, 0.0, 0.0, 0.0,
+     0.0, 0.0, 1.0, 0.0,
+     0.0, 1.0, 0.0, 0.0,
+     0.0, 0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_Z_UP_270 = Matrix4x4((
+    1.0, 0.0,  0.0, 0.0,
+    0.0, 0.0,  1.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0,  0.0, 1.0,
 ))
 
 MATRIX_ORIENT_Y_UP = Matrix4x4((
@@ -2661,11 +2682,53 @@ MATRIX_ORIENT_Y_UP = Matrix4x4((
     0.0, 0.0, 0.0, 1.0,
 ))
 
-MATRIX_ORIENT_Z_UP = Matrix4x4((
+MATRIX_ORIENT_Y_UP_180 = Matrix4x4((
+    -1.0, 0.0, 0.0,  0.0,
+     0.0, 1.0, 0.0,  0.0,
+     0.0, 0.0, -1.0, 0.0,
+     0.0, 0.0, 0.0,  1.0,
+))
+
+MATRIX_ORIENT_Y_UP_90 = Matrix4x4((
+    0.0, 0.0, -1.0, 0.0,
+    0.0, 1.0,  0.0, 0.0,
+    1.0, 0.0,  0.0, 0.0,
+    0.0, 0.0,  0.0, 1.0,
+))
+
+MATRIX_ORIENT_Y_UP_270 = Matrix4x4((
+     0.0, 0.0, 1.0, 0.0,
+     0.0, 1.0, 0.0, 0.0,
+    -1.0, 0.0, 0.0, 0.0,
+     0.0, 0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_X_UP = Matrix4x4((
     0.0, 0.0, 1.0, 0.0,
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_X_UP_180 = Matrix4x4((
+     0.0, 0.0, -1.0, 0.0,
+     1.0, 0.0,  0.0, 0.0,
+     0.0, -1.0, 0.0, 0.0,
+     0.0, 0.0,  0.0, 1.0,
+))
+
+MATRIX_ORIENT_X_UP_90 = Matrix4x4((
+    0.0, -1.0, 0.0, 0.0,
+    1.0,  0.0, 0.0, 0.0,
+    0.0,  0.0, 1.0, 0.0,
+    0.0,  0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_X_UP_270 = Matrix4x4((
+    0.0, 1.0, 0.0,  0.0,
+    1.0, 0.0, 0.0,  0.0,
+    0.0, 0.0, -1.0, 0.0,
+    0.0, 0.0, 0.0,  1.0,
 ))
 
 # fmt: on
@@ -2922,7 +2985,7 @@ class PssgViewerFrame(wx.Frame):
         FLOAT_SIZE = ctypes.sizeof(ctypes.c_float)
         UINT_SIZE = ctypes.sizeof(ctypes.c_uint32)
 
-        POS__LAYOUT = [
+        POS_LAYOUT = [
             LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 3, FLOAT_SIZE * 0),
         ]
 
@@ -3024,6 +3087,7 @@ class PssgViewerFrame(wx.Frame):
         azimuth: float = 0.0
         elevation: float = 0.0
 
+        orient_matrix: Matrix4x4 = MATRIX_ORIENT_Y_UP
         world_matrix: Matrix4x4 = Matrix4x4.identity()
         view_matrix: Matrix4x4 = Matrix4x4.identity()
         proj_matrix: Matrix4x4 = Matrix4x4.identity()
@@ -3070,7 +3134,7 @@ class PssgViewerFrame(wx.Frame):
                 vs_source=MESH_VERTEX_SHADER, fs_source=MESH_FRAGMENT_SHADER
             )
             self.gl_screen_mesh = PssgViewerFrame.SceneMesh(
-                PssgViewerFrame.SceneMesh.POS__LAYOUT,
+                PssgViewerFrame.SceneMesh.POS_LAYOUT,
                 (ctypes.c_float * len(QUAD_VERTICES))(*QUAD_VERTICES),
                 (ctypes.c_uint32 * len(QUAD_INDICES))(*QUAD_INDICES),
             )
@@ -3151,7 +3215,7 @@ class PssgViewerFrame(wx.Frame):
             # render pssg scene
             self.pssg_tree.compute_transforms()
             for _, node in self.pssg_tree.rendernodes.items():
-                world = self.world_matrix * node.model_matrix
+                world = self.orient_matrix * self.world_matrix * node.model_matrix
                 pssg_gl_mesh = self.pssg_meshes[node.id]
 
                 if node.texture is not None:
@@ -3338,6 +3402,21 @@ class PssgViewerFrame(wx.Frame):
             else:
                 return (Vector3(-1, -1, -1), Vector3(1, 1, 1))
 
+    MENU_ORIENT_MATRICES = {
+        1000: (False, "Orient Z-UP", MATRIX_ORIENT_Z_UP),
+        1010: (False, "Orient Z-UP 90", MATRIX_ORIENT_Z_UP_90),
+        1020: (False, "Orient Z-UP 180", MATRIX_ORIENT_Z_UP_180),
+        1030: (False, "Orient Z-UP 270", MATRIX_ORIENT_Z_UP_270),
+        1040: (True,  "Orient Y-UP", MATRIX_ORIENT_Y_UP),
+        1050: (False, "Orient Y-UP 90", MATRIX_ORIENT_Y_UP_90),
+        1060: (False, "Orient Y-UP 180", MATRIX_ORIENT_Y_UP_180),
+        1070: (False, "Orient Y-UP 270", MATRIX_ORIENT_Y_UP_270),
+        1080: (False, "Orient X-UP", MATRIX_ORIENT_X_UP),
+        1090: (False, "Orient X-UP 90", MATRIX_ORIENT_X_UP_90),
+        1100: (False, "Orient X-UP 180", MATRIX_ORIENT_X_UP_180),
+        1110: (False, "Orient X-UP 270", MATRIX_ORIENT_X_UP_270),
+    }
+
     def __init__(self, title: str, element: PssgElement):
         wx.Frame.__init__(
             self,
@@ -3356,7 +3435,20 @@ class PssgViewerFrame(wx.Frame):
         file_menu_exit = file_menu.Append(
             wx.ID_EXIT, "E&xit\tAlt+X", "close the viewer window"
         )
+
+        view_menu = wx.Menu()
+        view_menu_reset_camera = view_menu.Append(wx.ID_ANY, "Reset camera", "reset camera position")
+        view_menu.AppendSeparator()
+
+        for item_id, item_data in self.MENU_ORIENT_MATRICES.items():
+            is_default, name, _ = item_data
+            view_menu.Append(item_id, name, "change model orientation", kind=wx.ITEM_RADIO)
+
+            if is_default:
+                view_menu.Check(item_id, True)
+
         menu_bar.Append(file_menu, "&File")
+        menu_bar.Append(view_menu, "&View")
 
         self.status_bar = self.CreateStatusBar()
 
@@ -3373,6 +3465,10 @@ class PssgViewerFrame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(wx.EVT_MENU, self.on_close, file_menu_exit)
         self.Bind(wx.EVT_TIMER, self.on_timer)
+        self.Bind(wx.EVT_MENU, self.on_reset_camera, view_menu_reset_camera)
+
+        for item_id in self.MENU_ORIENT_MATRICES.keys():
+            self.Bind(wx.EVT_MENU, self.on_view_choice, id=item_id)
 
     def on_close(self, event: wx.Event):
         self.canvas.cleanup()
@@ -3381,6 +3477,14 @@ class PssgViewerFrame(wx.Frame):
     def on_timer(self, event: wx.TimerEvent):
         self.canvas.on_render()
 
+    def on_reset_camera(self, event: wx.MenuEvent):
+        self.canvas.azimuth = 0
+        self.canvas.elevation = 0
+        self.canvas.distance = 2
+
+    def on_view_choice(self, event: wx.MenuEvent):
+        _, _, matrrix = self.MENU_ORIENT_MATRICES[event.GetId()]
+        self.canvas.orient_matrix = matrrix
 
 class PssgJsonEncoder(json.JSONEncoder):
     def default(self, o: Any) -> Any:
