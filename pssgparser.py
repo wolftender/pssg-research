@@ -2516,8 +2516,17 @@ class PssgModelTree:
         skinjoints = node.find_children("SKINJOINT")
         inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
 
-        if len(skinjoints) != len(inverse_binds):
-            raise Exception(f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices")
+        if len(skinjoints) > len(inverse_binds):
+            raise Exception(
+                f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices"
+            )
+
+        for i in range(len(skinjoints)):
+            inverse_bind = Matrix4x4(inverse_binds[i].value)
+            skin_joint_id = str(skinjoints[i].get_attribute("joint").value.lstrip("#"))
+            result.skin_joints.append(
+                PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
+            )
 
         self.rendernodes[result.id] = result
         self.skinnednodes[result.id] = result
@@ -2537,8 +2546,44 @@ class PssgModelTree:
 
         raise Exception(f"cannot find a pssg library of type {type}")
 
+    def export_as_obj(self, output_file: str):
+        raise NotImplementedError()
 
-VERTEX_SHADER = """#version 400
+    def export_as_gltf(self, output_file: str):
+        raise NotImplementedError()
+
+SCREEN_VERTEX_SHADER = """#version 400
+
+layout(location = 0) in vec3 a_position;
+
+out VS_OUT {
+    vec2 uv;
+} vs_out;
+
+void main() {
+    vs_out.uv = (1.0 + a_position.xy) * 0.5;
+    gl_Position = vec4(a_position, 1.0);
+}
+"""
+
+
+SCREEN_FRAGMENT_SHADER = """#version 400
+
+in VS_OUT {
+    vec2 uv;
+} fs_in;
+
+uniform sampler2D u_input;
+
+out vec4 frag_color;
+
+void main() {
+    frag_color = texture(u_input, fs_in.uv).rgba;
+}
+"""
+
+
+MESH_VERTEX_SHADER = """#version 400
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
@@ -2563,7 +2608,7 @@ void main() {
 }
 """
 
-FRAGMENT_SHADER = """#version 400
+MESH_FRAGMENT_SHADER = """#version 400
 
 in VS_OUT {
     vec2 uv;
@@ -2590,52 +2635,39 @@ void main() {
 """
 
 # fmt: off
-CUBE_VERTICES = [
-    # Front (+Z) - red
-    -1.0, -1.0,  1.0, 0.0, 0.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-     1.0, -1.0,  1.0, 1.0, 0.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-     1.0,  1.0,  1.0, 1.0, 1.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-    -1.0,  1.0,  1.0, 0.0, 1.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0,
-
-    # Back (-Z) - green
-     1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0,  0.0, 0.0, -1.0,
-    -1.0, -1.0, -1.0, 1.0, 0.0, 0.0, 1.0, 0.0,  0.0, 0.0, -1.0,
-    -1.0,  1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0,  0.0, 0.0, -1.0,
-     1.0,  1.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0,  0.0, 0.0, -1.0,
-
-    # Left (-X) - blue
-    -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0,
-    -1.0, -1.0,  1.0, 1.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0,
-    -1.0,  1.0,  1.0, 1.0, 1.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0,
-    -1.0,  1.0, -1.0, 0.0, 1.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0,
-
-    # Right (+X) - yellow
-     1.0, -1.0,  1.0, 0.0, 0.0, 1.0, 1.0, 0.0,  1.0, 0.0, 0.0,
-     1.0, -1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 0.0,  1.0, 0.0, 0.0,
-     1.0,  1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 0.0,  1.0, 0.0, 0.0,
-     1.0,  1.0,  1.0, 0.0, 1.0, 1.0, 1.0, 0.0,  1.0, 0.0, 0.0,
-
-    # Top (+Y) - magenta
-    -1.0,  1.0,  1.0, 0.0, 0.0, 1.0, 0.0, 1.0,  0.0, 1.0, 0.0,
-     1.0,  1.0,  1.0, 1.0, 0.0, 1.0, 0.0, 1.0,  0.0, 1.0, 0.0,
-     1.0,  1.0, -1.0, 1.0, 1.0, 1.0, 0.0, 1.0,  0.0, 1.0, 0.0,
-    -1.0,  1.0, -1.0, 0.0, 1.0, 1.0, 0.0, 1.0,  0.0, 1.0, 0.0,
-
-    # Bottom (-Y) - cyan
-    -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0,  0.0, -1.0, 0.0,
-     1.0, -1.0, -1.0, 1.0, 0.0, 0.0, 1.0, 1.0,  0.0, -1.0, 0.0,
-     1.0, -1.0,  1.0, 1.0, 1.0, 0.0, 1.0, 1.0,  0.0, -1.0, 0.0,
-    -1.0, -1.0,  1.0, 0.0, 1.0, 0.0, 1.0, 1.0,  0.0, -1.0, 0.0,
+QUAD_VERTICES = [
+    -1.0, -1.0, 0.0,   # bottom-left
+     1.0, -1.0, 0.0,   # bottom-right
+     1.0,  1.0, 0.0,   # top-right
+    -1.0,  1.0, 0.0,   # top-left
 ]
 
-CUBE_INDICES = [
-     0,  1,  2,   2,  3,  0,   # Front
-     4,  5,  6,   6,  7,  4,   # Back
-     8,  9, 10,  10, 11,  8,   # Left
-    12, 13, 14,  14, 15, 12,   # Right
-    16, 17, 18,  18, 19, 16,   # Top
-    20, 21, 22,  22, 23, 20,   # Bottom
+QUAD_INDICES = [
+    0, 1, 2,
+    2, 3, 0,
 ]
+
+MATRIX_ORIENT_X_UP = Matrix4x4((
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_Y_UP = Matrix4x4((
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+))
+
+MATRIX_ORIENT_Z_UP = Matrix4x4((
+    0.0, 0.0, 1.0, 0.0,
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+))
+
 # fmt: on
 
 
@@ -2890,6 +2922,10 @@ class PssgViewerFrame(wx.Frame):
         FLOAT_SIZE = ctypes.sizeof(ctypes.c_float)
         UINT_SIZE = ctypes.sizeof(ctypes.c_uint32)
 
+        POS__LAYOUT = [
+            LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 3, FLOAT_SIZE * 0),
+        ]
+
         POS_UV_COLOR_NORMAL_LAYOUT = [
             LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 0),
             LayoutElement(1, 2, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 3),
@@ -2996,6 +3032,14 @@ class PssgViewerFrame(wx.Frame):
         pssg_textures: dict[str, PssgViewerFrame.SceneTexture] = {}
         pssg_meshes: dict[str, PssgViewerFrame.SceneMesh] = {}
 
+        framebuffer_msaa: Any = None
+        target_msaa_color: Any = None
+        target_msaa_depth: Any = None
+        framebuffer: Any = None
+        render_target: Optional[PssgViewerFrame.SceneTexture] = None
+        fb_width: int = 0
+        fb_height: int = 0
+
         def __init__(self, parent, element: PssgElement):
             gl_attrib_list: list[int] = [
                 glcanvas.WX_GL_CORE_PROFILE,
@@ -3021,13 +3065,14 @@ class PssgViewerFrame(wx.Frame):
             self.Bind(wx.EVT_MOTION, self.on_mouse_motion)
             self.Bind(wx.EVT_MOUSEWHEEL, self.on_mouse_scroll)
 
-            self.gl_shader_program = PssgViewerFrame.SceneShader(
-                vs_source=VERTEX_SHADER, fs_source=FRAGMENT_SHADER
+            self.gl_screen_program = PssgViewerFrame.SceneShader(vs_source=SCREEN_VERTEX_SHADER, fs_source=SCREEN_FRAGMENT_SHADER)
+            self.gl_geometry_program = PssgViewerFrame.SceneShader(
+                vs_source=MESH_VERTEX_SHADER, fs_source=MESH_FRAGMENT_SHADER
             )
-            self.gl_mesh = PssgViewerFrame.SceneMesh(
-                PssgViewerFrame.SceneMesh.POS_UV_COLOR_NORMAL_LAYOUT,
-                (ctypes.c_float * len(CUBE_VERTICES))(*CUBE_VERTICES),
-                (ctypes.c_uint32 * len(CUBE_INDICES))(*CUBE_INDICES),
+            self.gl_screen_mesh = PssgViewerFrame.SceneMesh(
+                PssgViewerFrame.SceneMesh.POS__LAYOUT,
+                (ctypes.c_float * len(QUAD_VERTICES))(*QUAD_VERTICES),
+                (ctypes.c_uint32 * len(QUAD_INDICES))(*QUAD_INDICES),
             )
 
             self.pssg_tree = PssgModelTree(element)
@@ -3059,6 +3104,10 @@ class PssgViewerFrame(wx.Frame):
             event.Skip()
             self.Refresh()
 
+            if self.gl_initialized:
+                self._destroy_render_targets()
+                self._init_render_targets()
+
         def on_paint(self, event: wx.PaintEvent):
             wx.PaintDC(self)
 
@@ -3086,20 +3135,18 @@ class PssgViewerFrame(wx.Frame):
             )
 
             GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glEnable(GL.GL_SAMPLE_ALPHA_TO_COVERAGE)
             GL.glViewport(0, 0, vp_size.width, vp_size.height)
+
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer_msaa)
             GL.glClearColor(0.207, 0.36, 0.64, 1)
             GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
 
-            self.gl_shader_program.bind()
-            self.gl_shader_program.set_matrix("u_world", self.world_matrix)
-            self.gl_shader_program.set_matrix("u_view", self.view_matrix)
-            self.gl_shader_program.set_matrix("u_projection", self.proj_matrix)
-
-            # reference cube to be removed later
-            self.gl_shader_program.set_vector4("u_color", (1.0, 1.0, 1.0, 1.0))
-            self.gl_shader_program.set_flag("u_use_diffuse", False)
-            self.gl_shader_program.set_sampler("u_diffuse", 0)
-            self.gl_mesh.draw()
+            self.gl_geometry_program.bind()
+            self.gl_geometry_program.set_matrix("u_world", self.world_matrix)
+            self.gl_geometry_program.set_matrix("u_view", self.view_matrix)
+            self.gl_geometry_program.set_matrix("u_projection", self.proj_matrix)
+            self.gl_geometry_program.set_vector4("u_color", (1.0, 1.0, 1.0, 1.0))
 
             # render pssg scene
             self.pssg_tree.compute_transforms()
@@ -3111,20 +3158,37 @@ class PssgViewerFrame(wx.Frame):
                     pssg_gl_texture = self.pssg_textures[node.texture.id]
                     pssg_gl_texture.bind(0)
 
-                    self.gl_shader_program.set_flag("u_use_diffuse", True)
-                    self.gl_shader_program.set_sampler("u_diffuse", 0)
+                    self.gl_geometry_program.set_flag("u_use_diffuse", True)
+                    self.gl_geometry_program.set_sampler("u_diffuse", 0)
                 else:
                     GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-                    self.gl_shader_program.set_flag("u_use_diffuse", False)
+                    self.gl_geometry_program.set_flag("u_use_diffuse", False)
 
-                self.gl_shader_program.set_matrix("u_world", world)
+                self.gl_geometry_program.set_matrix("u_world", world)
                 pssg_gl_mesh.draw()
+
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+            GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
+
+            # resolve msaa
+            if self.render_target is not None:
+                GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.framebuffer_msaa)
+                GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, self.framebuffer)
+                GL.glBlitFramebuffer(0, 0, self.fb_width, self.fb_height, 0, 0, self.fb_width, self.fb_height, GL.GL_COLOR_BUFFER_BIT, GL.GL_LINEAR)
+                GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
+                GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, 0)
+    
+                self.gl_screen_program.bind()
+                self.render_target.bind(0)
+                self.gl_screen_program.set_sampler("u_input", 0)
+                self.gl_screen_mesh.draw()              
 
             self.SwapBuffers()
 
         def cleanup(self):
-            self.gl_mesh.destroy()
-            self.gl_shader_program.destroy()
+            self.gl_screen_program.destroy()
+            self.gl_geometry_program.destroy()
+            self.gl_screen_mesh.destroy()
 
             for _, pssg_mesh in self.pssg_meshes.items():
                 pssg_mesh.destroy()
@@ -3132,6 +3196,7 @@ class PssgViewerFrame(wx.Frame):
             for _, pssg_texture in self.pssg_textures.items():
                 pssg_texture.destroy()
 
+            self._destroy_render_targets()
             self.gl_initialized = False
 
         def _initialize_if_needed(self):
@@ -3141,11 +3206,75 @@ class PssgViewerFrame(wx.Frame):
 
                 logging.info("opengl version: %s", self.gl_version.decode("utf-8"))  # type: ignore
 
-                self.gl_shader_program.start()
-                self.gl_mesh.start()
+                self._init_render_targets()
+                self.gl_screen_program.start()
+                self.gl_geometry_program.start()
+                self.gl_screen_mesh.start()
                 self._init_pssg_model_resources()
 
-                logging.info(self.gl_shader_program.uniforms)
+                logging.info(self.gl_geometry_program.uniforms)
+
+        def _init_render_targets(self):
+            vp_size = self.GetClientSize()
+            self.fb_width = vp_size.x
+            self.fb_height = vp_size.y
+
+            # non-msaa
+            self.framebuffer = GL.glGenFramebuffers(1)
+            self.render_target = PssgViewerFrame.SceneTexture(self.fb_width, self.fb_height, GL.GL_RGBA8, 1)
+            self.render_target.start()
+
+            # msaa
+            self.framebuffer_msaa = GL.glGenFramebuffers(1)
+            self.target_msaa_color = GL.glGenTextures(1)
+            self.target_msaa_depth = GL.glGenRenderbuffers(1)
+
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer_msaa)
+            GL.glBindTexture(GL.GL_TEXTURE_2D_MULTISAMPLE, self.target_msaa_color)
+            GL.glTexImage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, 4, GL.GL_RGBA8, self.fb_width, self.fb_height, True)
+            GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D_MULTISAMPLE, self.target_msaa_color, 0)
+
+            GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, self.target_msaa_depth)
+            GL.glRenderbufferStorageMultisample(GL.GL_RENDERBUFFER, 4, GL.GL_DEPTH24_STENCIL8, self.fb_width, self.fb_height)
+            GL.glFramebufferRenderbuffer(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT, GL.GL_RENDERBUFFER, self.target_msaa_depth)
+
+            GL.glDrawBuffers([GL.GL_COLOR_ATTACHMENT0])
+            if GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER) != GL.GL_FRAMEBUFFER_COMPLETE:
+                raise Exception(f"failed to create msaa framebuffer matching window size")
+
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self.render_target.handle)
+            GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self.render_target.handle, 0)
+            GL.glDrawBuffers([GL.GL_COLOR_ATTACHMENT0])
+            if GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER) != GL.GL_FRAMEBUFFER_COMPLETE:
+                raise Exception(f"failed to create framebuffer matching window size")
+
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+            GL.glBindTexture(GL.GL_TEXTURE_2D_MULTISAMPLE, 0)
+            GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, 0)
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+        def _destroy_render_targets(self):
+            if self.framebuffer_msaa is not None:
+                GL.glDeleteFramebuffers(1, [self.framebuffer_msaa])
+
+            if self.target_msaa_color is not None:
+                GL.glDeleteTextures(1, [self.target_msaa_color])
+
+            if self.target_msaa_depth is not None:
+                GL.glDeleteRenderbuffers(1, [self.target_msaa_depth])
+
+            if self.framebuffer is not None:
+                GL.glDeleteFramebuffers(1, [self.framebuffer])
+
+            if self.render_target is not None:
+                self.render_target.destroy()
+
+            self.framebuffer_msaa = None
+            self.target_msaa_color = None
+            self.target_msaa_depth = None
+            self.framebuffer = None
+            self.render_target = None
 
         def _init_pssg_model_resources(self):
             for id, rendernode in self.pssg_tree.rendernodes.items():
