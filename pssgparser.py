@@ -3088,6 +3088,7 @@ class PssgViewerFrame(wx.Frame):
         elevation: float = 0.0
 
         orient_matrix: Matrix4x4 = MATRIX_ORIENT_Y_UP
+        model_matrix: Matrix4x4 = Matrix4x4.identity()
         world_matrix: Matrix4x4 = Matrix4x4.identity()
         view_matrix: Matrix4x4 = Matrix4x4.identity()
         proj_matrix: Matrix4x4 = Matrix4x4.identity()
@@ -3197,6 +3198,7 @@ class PssgViewerFrame(wx.Frame):
             self.proj_matrix = Matrix4x4.perspective(
                 vp_size.width / vp_size.height, math.pi * 0.5, 0.05, 100.0
             )
+            self.world_matrix = self.orient_matrix * self.model_matrix
 
             GL.glEnable(GL.GL_DEPTH_TEST)
             GL.glEnable(GL.GL_SAMPLE_ALPHA_TO_COVERAGE)
@@ -3215,7 +3217,7 @@ class PssgViewerFrame(wx.Frame):
             # render pssg scene
             self.pssg_tree.compute_transforms()
             for _, node in self.pssg_tree.rendernodes.items():
-                world = self.orient_matrix * self.world_matrix * node.model_matrix
+                world = self.world_matrix * node.model_matrix
                 pssg_gl_mesh = self.pssg_meshes[node.id]
 
                 if node.texture is not None:
@@ -3250,6 +3252,7 @@ class PssgViewerFrame(wx.Frame):
             self.SwapBuffers()
 
         def cleanup(self):
+            self.SetCurrent(self.gl_context)
             self.gl_screen_program.destroy()
             self.gl_geometry_program.destroy()
             self.gl_screen_mesh.destroy()
@@ -3373,7 +3376,7 @@ class PssgViewerFrame(wx.Frame):
             model_span.z = model_span.z if model_span.z > 0.0 else 1.0
 
             scale = 1.0 / max(model_span.x, model_span.y, model_span.z)
-            self.world_matrix = Matrix4x4.scale(
+            self.model_matrix = Matrix4x4.scale(
                 Vector3(scale, scale, scale)
             )  # * Matrix4x4.translation(-model_center)
 
@@ -3429,6 +3432,7 @@ class PssgViewerFrame(wx.Frame):
 
         self.element = element
         self.canvas = self.PssgViewerCanvas(self, self.element)
+        self.SetMinSize(wx.Size(640, 480))
 
         menu_bar = wx.MenuBar()
         file_menu = wx.Menu()
@@ -3471,6 +3475,7 @@ class PssgViewerFrame(wx.Frame):
             self.Bind(wx.EVT_MENU, self.on_view_choice, id=item_id)
 
     def on_close(self, event: wx.Event):
+        self.timer.Stop()
         self.canvas.cleanup()
         self.Destroy()
 
