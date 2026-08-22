@@ -957,6 +957,10 @@ class PssgDecodedTexture:
 
         if self.texel_format == "dxt1":
             self._decode_texels_dxt1(image_block_data.value)
+        elif self.texel_format == "dxt3":
+            self._decode_texels_dxt3(image_block_data.value)
+        elif self.texel_format == "dxt5":
+            self._decode_texels_dxt5(image_block_data.value)
         else:
             raise Exception(f"unknown texel format {self.texel_format}")
 
@@ -1015,10 +1019,10 @@ class PssgDecodedTexture:
                     )
                 else:
                     c2 = ((r0 + r1) // 2, (g0 + g1) // 2, (b0 + b1) // 2, 255)
-                    c3 = (0, 0, 0, 255)
+                    c3 = (0, 0, 0, 0)
 
-                for j in range(4):
-                    for i in range(4):
+                for i in range(4):
+                    for j in range(4):
                         code = (ctable >> (2 * (4 * i + j))) & 0x03
                         x = (col * 4) + j
                         y = (row * 4) + i
@@ -1028,6 +1032,150 @@ class PssgDecodedTexture:
                         self.texels[idx + 1] = color[1]
                         self.texels[idx + 2] = color[2]
                         self.texels[idx + 3] = color[3]
+
+    def _decode_texels_dxt3(self, value: bytes):
+        block_count_x = self.width // 4
+        block_count_y = self.height // 4
+
+        self.texels = bytearray(self.width * self.height * 4)  # rgba
+        buffer_offset = 0
+
+        for row in range(block_count_y):
+            for col in range(block_count_x):
+                # alpha for this block is stored as 16 4-bit values
+                # unpack all as 8-bit values and then index when decoding the colors
+                alpha_packed = struct.unpack_from("<8B", value, buffer_offset)
+                buffer_offset += 8
+
+                c0_packed = struct.unpack_from("<H", value, buffer_offset)[0]
+                buffer_offset += 2
+
+                c1_packed = struct.unpack_from("<H", value, buffer_offset)[0]
+                buffer_offset += 2
+
+                ctable = struct.unpack_from("<I", value, buffer_offset)[0]
+                buffer_offset += 4
+
+                c0 = self._unpack_rgb565(c0_packed)
+                c1 = self._unpack_rgb565(c1_packed)
+
+                r0 = c0[0]
+                g0 = c0[1]
+                b0 = c0[2]
+                r1 = c1[0]
+                g1 = c1[1]
+                b1 = c1[2]
+
+                c2 = (
+                    (2 * r0 + r1) // 3,
+                    (2 * g0 + g1) // 3,
+                    (2 * b0 + b1) // 3,
+                    255,
+                )
+                c3 = (
+                    (r0 + 2 * r1) // 3,
+                    (g0 + 2 * g1) // 3,
+                    (b0 + 2 * b1) // 3,
+                    255,
+                )
+
+                alpha_idx = 0
+                for i in range(4):
+                    for j in range(4):
+                        alpha_packed_val = alpha_packed[alpha_idx // 2]
+                        alpha_raw = (alpha_packed_val & 0x0f) if alpha_idx % 2 == 0 else ((alpha_packed_val & 0xf0) >> 4)
+                        alpha_raw = (alpha_raw << 4) | alpha_raw
+                        alpha_idx += 1
+
+                        code = (ctable >> (2 * (4 * i + j))) & 0x03
+                        x = (col * 4) + j
+                        y = (row * 4) + i
+                        idx = (y * self.width + x) * 4
+                        color = [c0, c1, c2, c3][code]
+                        self.texels[idx + 0] = color[0]
+                        self.texels[idx + 1] = color[1]
+                        self.texels[idx + 2] = color[2]
+                        self.texels[idx + 3] = alpha_raw
+
+    def _decode_texels_dxt5(self, value: bytes):
+        block_count_x = self.width // 4
+        block_count_y = self.height // 4
+
+        self.texels = bytearray(self.width * self.height * 4)  # rgba
+        buffer_offset = 0
+
+        for row in range(block_count_y):
+            for col in range(block_count_x):
+                alpha_bytes = struct.unpack_from("<8B", value, buffer_offset)
+                buffer_offset += 8
+
+                c0_packed = struct.unpack_from("<H", value, buffer_offset)[0]
+                buffer_offset += 2
+
+                c1_packed = struct.unpack_from("<H", value, buffer_offset)[0]
+                buffer_offset += 2
+
+                ctable = struct.unpack_from("<I", value, buffer_offset)[0]
+                buffer_offset += 4
+
+                alpha_lut = bytearray(8)
+                alpha_lut[0] = alpha_bytes[0]
+                alpha_lut[1] = alpha_bytes[1]
+
+                if alpha_bytes[0] > alpha_bytes[1]:
+                    for i in range(1, 7):
+                        alpha_lut[1 + i] = ((7 - i) * alpha_bytes[0] + i * alpha_bytes[1]) // 7
+                else:
+                    for i in range(1, 5):
+                        alpha_lut[1 + i] = ((5 - i) * alpha_bytes[0] + i * alpha_bytes[1]) // 5
+                    
+                    alpha_lut[6] = 0
+                    alpha_lut[7] = 255
+
+                c0 = self._unpack_rgb565(c0_packed)
+                c1 = self._unpack_rgb565(c1_packed)
+
+                r0 = c0[0]
+                g0 = c0[1]
+                b0 = c0[2]
+                r1 = c1[0]
+                g1 = c1[1]
+                b1 = c1[2]
+
+                c2 = (
+                    (2 * r0 + r1) // 3,
+                    (2 * g0 + g1) // 3,
+                    (2 * b0 + b1) // 3,
+                    255,
+                )
+                c3 = (
+                    (r0 + 2 * r1) // 3,
+                    (g0 + 2 * g1) // 3,
+                    (b0 + 2 * b1) // 3,
+                    255,
+                )
+
+                alpha_values: int = 0
+                for i in range(6):
+                    alpha_values |= alpha_bytes[2 + i] << (8 * i)
+
+                alpha_idx = 0
+                for i in range(4):
+                    for j in range(4):
+                        alpha_val = (alpha_values >> (3 * alpha_idx)) & 0x07
+                        alpha_idx += 1
+
+                        code = (ctable >> (2 * (4 * i + j))) & 0x03
+                        x = (col * 4) + j
+                        y = (row * 4) + i
+                        idx = (y * self.width + x) * 4
+                        color = [c0, c1, c2, c3][code]
+                        self.texels[idx + 0] = color[0]
+                        self.texels[idx + 1] = color[1]
+                        self.texels[idx + 2] = color[2]
+                        self.texels[idx + 3] = alpha_lut[alpha_val]
+
+            
 
 
 class Vector3(ctypes.Structure):
@@ -2080,9 +2228,9 @@ class PssgModelTree:
         if shader_group_id is None:
             return
 
-        shader_group = self._find_pssg_shader_group(shader_group_id.value)
+        shader_group = self._find_pssg_shader_group(shader_group_id.value.lstrip('#'))
         if shader_group is None:
-            return
+            raise Exception(f"invalid shader group name {shader_group_id.value}")
 
         shader_inputs = shader_group.find_children("SHADERINPUT")
         for shader_input in shader_inputs:
