@@ -2074,7 +2074,7 @@ class PssgModelTree:
             node.model_matrix = world * node.local_matrix
 
             for child in node.children:
-                _recurse_model_node(child, world)
+                _recurse_model_node(child, node.model_matrix)
 
         _recurse_model_node(self.root, Matrix4x4.identity())
 
@@ -2114,7 +2114,7 @@ class PssgModelTree:
             result.children.append(self._parse_pssg_node(child))
             return True
         elif child.name == "TRANSFORM":
-            transform_matrix = Matrix4x4(child.value)
+            transform_matrix = Matrix4x4(child.value).transpose()
             translation, rotation, scale = transform_matrix.decompose()
 
             result.bind_translation = translation
@@ -2522,7 +2522,7 @@ class PssgModelTree:
             )
 
         for i in range(len(skinjoints)):
-            inverse_bind = Matrix4x4(inverse_binds[i].value)
+            inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
             skin_joint_id = str(skinjoints[i].get_attribute("joint").value.lstrip("#"))
             result.skin_joints.append(
                 PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
@@ -2606,6 +2606,48 @@ void main() {
     vs_out.color = a_color;
     vs_out.normal = (u_world * vec4(a_normal, 0.0)).xyz;
     gl_Position = u_projection * u_view * u_world * vec4(a_position, 1.0);
+}
+"""
+
+SKINNED_VERTEX_SHADER = """#version 400
+
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in vec3 a_color;
+layout(location = 3) in vec3 a_normal;
+layout(location = 4) in vec4 a_skinweight;
+layout(location = 5) in ivec4 a_skinjoint;
+
+uniform mat4 u_projection;
+uniform mat4 u_view;
+uniform mat4 u_world;
+
+layout (std140) uniform u_bones {
+    mat4 bone_matrix[100];
+};
+
+out VS_OUT {
+    vec2 uv;
+    vec3 color;
+    vec3 normal;
+} vs_out;
+
+void main() {
+    mat4 skin_matrix =
+        bone_matrix[a_skinjoint.x] * a_skinweight.x + 
+        bone_matrix[a_skinjoint.y] * a_skinweight.y +
+        bone_matrix[a_skinjoint.z] * a_skinweight.z +
+        bone_matrix[a_skinjoint.w] * a_skinweight.w;
+
+    vs_out.uv = a_uv;
+    vs_out.color = a_color;
+    vs_out.normal = (u_world * vec4(a_normal, 0.0)).xyz;
+    gl_Position = 
+        u_projection *
+        u_view *
+        u_world *
+        skin_matrix *
+        vec4(a_position, 1.0);
 }
 """
 
@@ -3082,6 +3124,41 @@ class PssgViewerFrame(wx.Frame):
                 GL.GL_TRIANGLES, self.num_indices, GL.GL_UNSIGNED_INT, None
             )
 
+    class ScenePose:
+        def __init__(self, num_matrices: int):
+            self.num_matrices = num_matrices
+            self.cpu_buffer = (ctypes.c_float * (num_matrices * 16))()
+            self.gpu_buffer = None
+
+        def start(self):
+            if self.gpu_buffer is not None:
+                raise Exception("skin already started")
+
+            self.gpu_buffer = GL.glGenBuffers(1)
+
+            GL.glBindBuffer(GL.GL_UNIFORM_BUFFER, self.gpu_buffer)
+            GL.glBufferData(GL.GL_UNIFORM_BUFFER, self.cpu_buffer, GL.GL_STATIC_DRAW)
+            GL.glBindBuffer(GL.GL_UNIFORM_BUFFER, 0)
+
+        def upload(self):
+            GL.glBindBuffer(GL.GL_UNIFORM_BUFFER, self.gpu_buffer)
+            GL.glBufferSubData(
+                GL.GL_UNIFORM_BUFFER, 0, ctypes.sizeof(self.cpu_buffer), self.cpu_buffer
+            )
+            GL.glBindBuffer(GL.GL_UNIFORM_BUFFER, 0)
+
+        def destroy(self):
+            GL.glDeleteBuffers(1, [self.gpu_buffer])
+            self.gpu_buffer = None
+
+        def set_matrix(self, slot: int, value: Matrix4x4):
+            transposed = value.transpose()
+            pointer = slot * 16
+
+            for v in transposed:
+                self.cpu_buffer[pointer] = v
+                pointer += 1
+
     class PssgViewerCanvas(glcanvas.GLCanvas):
         center: Vector3 = Vector3.zero()
         distance: float = 2.0
@@ -3097,6 +3174,7 @@ class PssgViewerFrame(wx.Frame):
         pssg_tree: PssgModelTree
         pssg_textures: dict[str, PssgViewerFrame.SceneTexture] = {}
         pssg_meshes: dict[str, PssgViewerFrame.SceneMesh] = {}
+        pssg_skins: dict[str, PssgViewerFrame.ScenePose] = {}
 
         framebuffer_msaa: Any = None
         target_msaa_color: Any = None
@@ -3134,8 +3212,11 @@ class PssgViewerFrame(wx.Frame):
             self.gl_screen_program = PssgViewerFrame.SceneShader(
                 vs_source=SCREEN_VERTEX_SHADER, fs_source=SCREEN_FRAGMENT_SHADER
             )
-            self.gl_geometry_program = PssgViewerFrame.SceneShader(
+            self.gl_static_program = PssgViewerFrame.SceneShader(
                 vs_source=MESH_VERTEX_SHADER, fs_source=MESH_FRAGMENT_SHADER
+            )
+            self.gl_skinned_program = PssgViewerFrame.SceneShader(
+                vs_source=SKINNED_VERTEX_SHADER, fs_source=MESH_FRAGMENT_SHADER
             )
             self.gl_screen_mesh = PssgViewerFrame.SceneMesh(
                 PssgViewerFrame.SceneMesh.POS_LAYOUT,
@@ -3211,15 +3292,39 @@ class PssgViewerFrame(wx.Frame):
             GL.glClearColor(0.207, 0.36, 0.64, 1)
             GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
 
-            self.gl_geometry_program.bind()
-            self.gl_geometry_program.set_matrix("u_world", self.world_matrix)
-            self.gl_geometry_program.set_matrix("u_view", self.view_matrix)
-            self.gl_geometry_program.set_matrix("u_projection", self.proj_matrix)
-            self.gl_geometry_program.set_vector4("u_color", (1.0, 1.0, 1.0, 1.0))
-
             # render pssg scene
             self.pssg_tree.compute_transforms()
             for _, node in self.pssg_tree.rendernodes.items():
+                gl_current_program = None
+                if isinstance(node, PssgModelTree.PssgModelSkinnedNode):
+                    self.gl_skinned_program.bind()
+                    gl_current_program = self.gl_skinned_program
+
+                    # update and bind the skin
+                    gl_skin = self.pssg_skins[node.id]
+
+                    matrix_offs = 0
+                    for joint_id, inverse_bind in node.skin_joints:
+                        if joint_id in self.pssg_tree.jointnodes:
+                            offset_matrix = self.pssg_tree.jointnodes[joint_id].model_matrix * inverse_bind
+                            gl_skin.set_matrix(
+                                matrix_offs,
+                                offset_matrix,
+                            )
+
+                        matrix_offs += 1
+
+                    gl_skin.upload()
+                    GL.glBindBufferBase(GL.GL_UNIFORM_BUFFER, 0, gl_skin.gpu_buffer)
+                else:
+                    self.gl_static_program.bind()
+                    gl_current_program = self.gl_static_program
+
+                gl_current_program.set_matrix("u_world", self.world_matrix)
+                gl_current_program.set_matrix("u_view", self.view_matrix)
+                gl_current_program.set_matrix("u_projection", self.proj_matrix)
+                gl_current_program.set_vector4("u_color", (1.0, 1.0, 1.0, 1.0))
+
                 world = self.world_matrix * node.model_matrix
                 pssg_gl_mesh = self.pssg_meshes[node.id]
 
@@ -3227,13 +3332,13 @@ class PssgViewerFrame(wx.Frame):
                     pssg_gl_texture = self.pssg_textures[node.texture.id]
                     pssg_gl_texture.bind(0)
 
-                    self.gl_geometry_program.set_flag("u_use_diffuse", True)
-                    self.gl_geometry_program.set_sampler("u_diffuse", 0)
+                    gl_current_program.set_flag("u_use_diffuse", True)
+                    gl_current_program.set_sampler("u_diffuse", 0)
                 else:
                     GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-                    self.gl_geometry_program.set_flag("u_use_diffuse", False)
+                    gl_current_program.set_flag("u_use_diffuse", False)
 
-                self.gl_geometry_program.set_matrix("u_world", world)
+                gl_current_program.set_matrix("u_world", world)
                 pssg_gl_mesh.draw()
 
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
@@ -3268,7 +3373,8 @@ class PssgViewerFrame(wx.Frame):
         def cleanup(self):
             self.SetCurrent(self.gl_context)
             self.gl_screen_program.destroy()
-            self.gl_geometry_program.destroy()
+            self.gl_static_program.destroy()
+            self.gl_skinned_program.destroy()
             self.gl_screen_mesh.destroy()
 
             for _, pssg_mesh in self.pssg_meshes.items():
@@ -3277,8 +3383,15 @@ class PssgViewerFrame(wx.Frame):
             for _, pssg_texture in self.pssg_textures.items():
                 pssg_texture.destroy()
 
+            for _, pssg_skin in self.pssg_skins.items():
+                pssg_skin.destroy()
+
             self._destroy_render_targets()
             self.gl_initialized = False
+
+            self.pssg_meshes = {}
+            self.pssg_textures = {}
+            self.pssg_skins = {}
 
         def _initialize_if_needed(self):
             if not self.gl_initialized:
@@ -3289,11 +3402,12 @@ class PssgViewerFrame(wx.Frame):
 
                 self._init_render_targets()
                 self.gl_screen_program.start()
-                self.gl_geometry_program.start()
+                self.gl_static_program.start()
+                self.gl_skinned_program.start()
                 self.gl_screen_mesh.start()
                 self._init_pssg_model_resources()
 
-                logging.info(self.gl_geometry_program.uniforms)
+                logging.info(self.gl_static_program.uniforms)
 
         def _init_render_targets(self):
             vp_size = self.GetClientSize()
@@ -3419,6 +3533,10 @@ class PssgViewerFrame(wx.Frame):
                     texturenode.texels,
                 )
                 self.pssg_textures[id].start()
+
+            for id, skinnode in self.pssg_tree.skinnednodes.items():
+                self.pssg_skins[id] = PssgViewerFrame.ScenePose(num_matrices=100)
+                self.pssg_skins[id].start()
 
             # make the model fit the viewport easily
             min_bounds, max_bounds = self._calculate_model_bounds()
