@@ -1083,7 +1083,11 @@ class PssgDecodedTexture:
                 for i in range(4):
                     for j in range(4):
                         alpha_packed_val = alpha_packed[alpha_idx // 2]
-                        alpha_raw = (alpha_packed_val & 0x0f) if alpha_idx % 2 == 0 else ((alpha_packed_val & 0xf0) >> 4)
+                        alpha_raw = (
+                            (alpha_packed_val & 0x0F)
+                            if alpha_idx % 2 == 0
+                            else ((alpha_packed_val & 0xF0) >> 4)
+                        )
                         alpha_raw = (alpha_raw << 4) | alpha_raw
                         alpha_idx += 1
 
@@ -1124,11 +1128,15 @@ class PssgDecodedTexture:
 
                 if alpha_bytes[0] > alpha_bytes[1]:
                     for i in range(1, 7):
-                        alpha_lut[1 + i] = ((7 - i) * alpha_bytes[0] + i * alpha_bytes[1]) // 7
+                        alpha_lut[1 + i] = (
+                            (7 - i) * alpha_bytes[0] + i * alpha_bytes[1]
+                        ) // 7
                 else:
                     for i in range(1, 5):
-                        alpha_lut[1 + i] = ((5 - i) * alpha_bytes[0] + i * alpha_bytes[1]) // 5
-                    
+                        alpha_lut[1 + i] = (
+                            (5 - i) * alpha_bytes[0] + i * alpha_bytes[1]
+                        ) // 5
+
                     alpha_lut[6] = 0
                     alpha_lut[7] = 255
 
@@ -1174,8 +1182,6 @@ class PssgDecodedTexture:
                         self.texels[idx + 1] = color[1]
                         self.texels[idx + 2] = color[2]
                         self.texels[idx + 3] = alpha_lut[alpha_val]
-
-            
 
 
 class Vector3(ctypes.Structure):
@@ -2228,7 +2234,7 @@ class PssgModelTree:
         if shader_group_id is None:
             return
 
-        shader_group = self._find_pssg_shader_group(shader_group_id.value.lstrip('#'))
+        shader_group = self._find_pssg_shader_group(shader_group_id.value.lstrip("#"))
         if shader_group is None:
             raise Exception(f"invalid shader group name {shader_group_id.value}")
 
