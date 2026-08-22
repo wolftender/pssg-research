@@ -2552,6 +2552,7 @@ class PssgModelTree:
     def export_as_gltf(self, output_file: str):
         raise NotImplementedError()
 
+
 SCREEN_VERTEX_SHADER = """#version 400
 
 layout(location = 0) in vec3 a_position;
@@ -3130,7 +3131,9 @@ class PssgViewerFrame(wx.Frame):
             self.Bind(wx.EVT_MOTION, self.on_mouse_motion)
             self.Bind(wx.EVT_MOUSEWHEEL, self.on_mouse_scroll)
 
-            self.gl_screen_program = PssgViewerFrame.SceneShader(vs_source=SCREEN_VERTEX_SHADER, fs_source=SCREEN_FRAGMENT_SHADER)
+            self.gl_screen_program = PssgViewerFrame.SceneShader(
+                vs_source=SCREEN_VERTEX_SHADER, fs_source=SCREEN_FRAGMENT_SHADER
+            )
             self.gl_geometry_program = PssgViewerFrame.SceneShader(
                 vs_source=MESH_VERTEX_SHADER, fs_source=MESH_FRAGMENT_SHADER
             )
@@ -3240,14 +3243,25 @@ class PssgViewerFrame(wx.Frame):
             if self.render_target is not None:
                 GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.framebuffer_msaa)
                 GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, self.framebuffer)
-                GL.glBlitFramebuffer(0, 0, self.fb_width, self.fb_height, 0, 0, self.fb_width, self.fb_height, GL.GL_COLOR_BUFFER_BIT, GL.GL_LINEAR)
+                GL.glBlitFramebuffer(
+                    0,
+                    0,
+                    self.fb_width,
+                    self.fb_height,
+                    0,
+                    0,
+                    self.fb_width,
+                    self.fb_height,
+                    GL.GL_COLOR_BUFFER_BIT,
+                    GL.GL_LINEAR,
+                )
                 GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
                 GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, 0)
-    
+
                 self.gl_screen_program.bind()
                 self.render_target.bind(0)
                 self.gl_screen_program.set_sampler("u_input", 0)
-                self.gl_screen_mesh.draw()              
+                self.gl_screen_mesh.draw()
 
             self.SwapBuffers()
 
@@ -3288,7 +3302,9 @@ class PssgViewerFrame(wx.Frame):
 
             # non-msaa
             self.framebuffer = GL.glGenFramebuffers(1)
-            self.render_target = PssgViewerFrame.SceneTexture(self.fb_width, self.fb_height, GL.GL_RGBA8, 1)
+            self.render_target = PssgViewerFrame.SceneTexture(
+                self.fb_width, self.fb_height, GL.GL_RGBA8, 1
+            )
             self.render_target.start()
 
             # msaa
@@ -3298,22 +3314,60 @@ class PssgViewerFrame(wx.Frame):
 
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer_msaa)
             GL.glBindTexture(GL.GL_TEXTURE_2D_MULTISAMPLE, self.target_msaa_color)
-            GL.glTexImage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, 4, GL.GL_RGBA8, self.fb_width, self.fb_height, True)
-            GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D_MULTISAMPLE, self.target_msaa_color, 0)
+            GL.glTexImage2DMultisample(
+                GL.GL_TEXTURE_2D_MULTISAMPLE,
+                4,
+                GL.GL_RGBA8,
+                self.fb_width,
+                self.fb_height,
+                True,
+            )
+            GL.glFramebufferTexture2D(
+                GL.GL_FRAMEBUFFER,
+                GL.GL_COLOR_ATTACHMENT0,
+                GL.GL_TEXTURE_2D_MULTISAMPLE,
+                self.target_msaa_color,
+                0,
+            )
 
             GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, self.target_msaa_depth)
-            GL.glRenderbufferStorageMultisample(GL.GL_RENDERBUFFER, 4, GL.GL_DEPTH24_STENCIL8, self.fb_width, self.fb_height)
-            GL.glFramebufferRenderbuffer(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT, GL.GL_RENDERBUFFER, self.target_msaa_depth)
+            GL.glRenderbufferStorageMultisample(
+                GL.GL_RENDERBUFFER,
+                4,
+                GL.GL_DEPTH24_STENCIL8,
+                self.fb_width,
+                self.fb_height,
+            )
+            GL.glFramebufferRenderbuffer(
+                GL.GL_FRAMEBUFFER,
+                GL.GL_DEPTH_ATTACHMENT,
+                GL.GL_RENDERBUFFER,
+                self.target_msaa_depth,
+            )
 
             GL.glDrawBuffers([GL.GL_COLOR_ATTACHMENT0])
-            if GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER) != GL.GL_FRAMEBUFFER_COMPLETE:
-                raise Exception(f"failed to create msaa framebuffer matching window size")
+            if (
+                GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+                != GL.GL_FRAMEBUFFER_COMPLETE
+            ):
+                raise Exception(
+                    f"failed to create msaa framebuffer matching window size"
+                )
 
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.framebuffer)
             GL.glBindTexture(GL.GL_TEXTURE_2D, self.render_target.handle)
-            GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self.render_target.handle, 0)
+            GL.glFramebufferTexture2D(
+                GL.GL_FRAMEBUFFER,
+                GL.GL_COLOR_ATTACHMENT0,
+                GL.GL_TEXTURE_2D,
+                self.render_target.handle,
+                0,
+            )
             GL.glDrawBuffers([GL.GL_COLOR_ATTACHMENT0])
-            if GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER) != GL.GL_FRAMEBUFFER_COMPLETE:
+            if (
+                GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+                != GL.GL_FRAMEBUFFER_COMPLETE
+            ):
                 raise Exception(f"failed to create framebuffer matching window size")
 
             GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
@@ -3410,7 +3464,7 @@ class PssgViewerFrame(wx.Frame):
         1010: (False, "Orient Z-UP 90", MATRIX_ORIENT_Z_UP_90),
         1020: (False, "Orient Z-UP 180", MATRIX_ORIENT_Z_UP_180),
         1030: (False, "Orient Z-UP 270", MATRIX_ORIENT_Z_UP_270),
-        1040: (True,  "Orient Y-UP", MATRIX_ORIENT_Y_UP),
+        1040: (True, "Orient Y-UP", MATRIX_ORIENT_Y_UP),
         1050: (False, "Orient Y-UP 90", MATRIX_ORIENT_Y_UP_90),
         1060: (False, "Orient Y-UP 180", MATRIX_ORIENT_Y_UP_180),
         1070: (False, "Orient Y-UP 270", MATRIX_ORIENT_Y_UP_270),
@@ -3441,12 +3495,16 @@ class PssgViewerFrame(wx.Frame):
         )
 
         view_menu = wx.Menu()
-        view_menu_reset_camera = view_menu.Append(wx.ID_ANY, "Reset camera", "reset camera position")
+        view_menu_reset_camera = view_menu.Append(
+            wx.ID_ANY, "Reset camera", "reset camera position"
+        )
         view_menu.AppendSeparator()
 
         for item_id, item_data in self.MENU_ORIENT_MATRICES.items():
             is_default, name, _ = item_data
-            view_menu.Append(item_id, name, "change model orientation", kind=wx.ITEM_RADIO)
+            view_menu.Append(
+                item_id, name, "change model orientation", kind=wx.ITEM_RADIO
+            )
 
             if is_default:
                 view_menu.Check(item_id, True)
@@ -3490,6 +3548,7 @@ class PssgViewerFrame(wx.Frame):
     def on_view_choice(self, event: wx.MenuEvent):
         _, _, matrrix = self.MENU_ORIENT_MATRICES[event.GetId()]
         self.canvas.orient_matrix = matrrix
+
 
 class PssgJsonEncoder(json.JSONEncoder):
     def default(self, o: Any) -> Any:
