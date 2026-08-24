@@ -7,6 +7,7 @@ import json
 import dataclasses
 import ctypes
 import math
+import time
 import xml.etree.ElementTree
 
 from array import array
@@ -15,6 +16,7 @@ from typing import Any, Optional, Union, Iterator, overload, NamedTuple
 from dataclasses import dataclass, field
 
 import wx
+import wx.dataview
 from wx import glcanvas
 
 import OpenGL
@@ -2051,7 +2053,9 @@ class PssgModelTree:
 
     @dataclass
     class PssgModelMorphNode(PssgModelRenderNode):
-        morph_targets: list[PssgModelTree.PssgRenderDataSource] = field(default_factory=list)
+        morph_targets: list[PssgModelTree.PssgRenderDataSource] = field(
+            default_factory=list
+        )
 
     class PssgSkinJoint(NamedTuple):
         joint_id: str
@@ -2074,6 +2078,7 @@ class PssgModelTree:
 
     root: PssgModelNode
     textures: dict[str, PssgDecodedTexture] = {}
+    nodes: dict[str, PssgModelNode] = {}
     rendernodes: dict[str, PssgModelRenderNode] = {}
     skinnednodes: dict[str, PssgModelSkinnedNode] = {}
     jointnodes: dict[str, PssgModelNode] = {}
@@ -2149,6 +2154,14 @@ class PssgModelTree:
 
         _recurse_model_node(self.root, Matrix4x4.identity())
 
+    def bind_pose(self):
+        for node in self.iter_nodes():
+            node.translation = node.bind_translation
+            node.rotation = node.bind_rotation
+            node.scale = node.bind_scale
+
+        self.compute_transforms()
+
     def _parse_pssg_node(self, node: PssgElement) -> PssgModelNode:
         """
         there are different types of nodes here to parse
@@ -2167,13 +2180,19 @@ class PssgModelTree:
 
         match node.name:
             case "NODE" | "ROOTNODE" | "JOINTNODE":
-                return self._parse_pssg_regular_node(node)
+                result = self._parse_pssg_regular_node(node)
+                self.nodes[result.id] = result
+                return result
 
             case "RENDERNODE":
-                return self._parse_pssg_render_node(node)
+                result = self._parse_pssg_render_node(node)
+                self.nodes[result.id] = result
+                return result
 
             case "SKINNODE":
-                return self._parse_pssg_skin_node(node)
+                result = self._parse_pssg_skin_node(node)
+                self.nodes[result.id] = result
+                return result
 
             case _:
                 raise Exception(f"unknown node type {node.name}")
@@ -2519,7 +2538,9 @@ class PssgModelTree:
             )
 
         self._parse_pssg_shader_instance(node, shader_instance)
-        node.render_data_source = self._parse_pssg_render_data_source(render_data_source)
+        node.render_data_source = self._parse_pssg_render_data_source(
+            render_data_source
+        )
 
     def _parse_pssg_render_node(self, node: PssgElement) -> PssgModelNode:
         node_id = node.get_attribute("id").value
@@ -2583,7 +2604,9 @@ class PssgModelTree:
             raise Exception(f"shader instance {shader_instance_id} does not exist")
 
         self._parse_pssg_shader_instance(result, shader_instance)
-        result.render_data_source = self._parse_pssg_render_data_source(render_data_source)
+        result.render_data_source = self._parse_pssg_render_data_source(
+            render_data_source
+        )
 
         skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
         skeleton = self._find_pssg_skeleton(skeleton_id)
@@ -2823,7 +2846,9 @@ class PssgMotionTree:
                         case "Scale":
                             result_channel.target_property = self.TargetProperty.SCALE
                         case "MorphTargetWeight1":
-                            result_channel.target_property = self.TargetProperty.MORPHWEIGHT1
+                            result_channel.target_property = (
+                                self.TargetProperty.MORPHWEIGHT1
+                            )
                         case _:
                             logging.error(
                                 f"invalid value block type {value_block_key_type}"
@@ -2841,8 +2866,16 @@ class PssgMotionTree:
                     num_scalars_time_series = len(time_series_data.value) // 4
                     num_scalars_value_series = len(value_series_data.value) // 4
 
-                    result_channel.time_series = [*struct.unpack_from(f">{num_scalars_time_series}f", time_series_data.value)]
-                    result_channel.data_series = [*struct.unpack_from(f">{num_scalars_value_series}f", value_series_data.value)]
+                    result_channel.time_series = [
+                        *struct.unpack_from(
+                            f">{num_scalars_time_series}f", time_series_data.value
+                        )
+                    ]
+                    result_channel.data_series = [
+                        *struct.unpack_from(
+                            f">{num_scalars_value_series}f", value_series_data.value
+                        )
+                    ]
 
                     result.channels.append(result_channel)
 
@@ -2870,15 +2903,17 @@ class PssgMotionTree:
                         case "Scale":
                             result_channel.target_property = self.TargetProperty.SCALE
                         case "MorphTargetWeight1":
-                            result_channel.target_property = self.TargetProperty.MORPHWEIGHT1
-                        case _:
-                            logging.error(
-                                f"invalid value block type {value_type}"
+                            result_channel.target_property = (
+                                self.TargetProperty.MORPHWEIGHT1
                             )
+                        case _:
+                            logging.error(f"invalid value block type {value_type}")
 
                     value_attrib = child.get_attribute("value")
                     num_scalars = len(value_attrib.value) // 4
-                    result_channel.data_series = [*struct.unpack_from(f">{num_scalars}f", value_attrib.value)]
+                    result_channel.data_series = [
+                        *struct.unpack_from(f">{num_scalars}f", value_attrib.value)
+                    ]
 
                 case _:
                     raise Exception(f"unknown animation channel type {child.name}")
@@ -3511,6 +3546,13 @@ class PssgViewerFrame(wx.Frame):
                 self.cpu_buffer[pointer] = v
                 pointer += 1
 
+    @dataclass
+    class MotionChannelState:
+        motion_channel: PssgMotionTree.AnimationChannel
+        node_ref: PssgModelTree.PssgModelNode
+        prev_keyframe: int
+        next_keyframe: int
+
     class PssgViewerCanvas(glcanvas.GLCanvas):
         center: Vector3 = Vector3.zero()
         distance: float = 2.0
@@ -3536,6 +3578,12 @@ class PssgViewerFrame(wx.Frame):
         render_target: Optional[PssgViewerFrame.SceneTexture] = None
         fb_width: int = 0
         fb_height: int = 0
+
+        channel_states: list[PssgViewerFrame.MotionChannelState] = []
+        motion_time: float = 0.0
+        motion_end_time: float = 0.0
+
+        last_tick: float = time.perf_counter()
 
         def __init__(
             self, parent, element: PssgElement, anim_element: Optional[PssgElement]
@@ -3629,6 +3677,11 @@ class PssgViewerFrame(wx.Frame):
             if not self.gl_initialized:
                 return
 
+            this_tick = time.perf_counter()
+            delta_time = this_tick - self.last_tick
+            self.last_tick = this_tick
+            self.motion_time += delta_time
+
             vp_size = self.GetClientSize()
 
             self.view_matrix = Matrix4x4.translation(-self.center)
@@ -3651,7 +3704,9 @@ class PssgViewerFrame(wx.Frame):
             GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
 
             # render pssg scene
+            self._update_animation()
             self.pssg_tree.compute_transforms()
+
             for _, node in self.pssg_tree.rendernodes.items():
                 gl_current_program = None
                 if isinstance(node, PssgModelTree.PssgModelSkinnedNode):
@@ -3754,6 +3809,130 @@ class PssgViewerFrame(wx.Frame):
             self.pssg_textures = {}
             self.pssg_skins = {}
 
+        def play_motion(self, motion_name: str):
+            if self.pssg_anim_tree is not None:
+                self._init_channel_states(self.pssg_anim_tree.animations[motion_name])
+
+        def _init_channel_states(self, motion: PssgMotionTree.Animation):
+            self.channel_states = []
+            self.motion_time = 0.0
+            self.motion_end_time = motion.end_time
+
+            self.pssg_tree.bind_pose()
+
+            for channel in motion.channels:
+                if channel.target_node not in self.pssg_tree.nodes:
+                    continue
+
+                node_ref = self.pssg_tree.nodes[channel.target_node]
+                channel_state = PssgViewerFrame.MotionChannelState(
+                    motion_channel=channel,
+                    node_ref=node_ref,
+                    prev_keyframe=0,
+                    next_keyframe=0,
+                )
+
+                if channel.num_keyframes > 1:
+                    channel_state.next_keyframe = 1
+
+                self.channel_states.append(channel_state)
+
+        def _update_animation(self):
+            if self.motion_time > self.motion_end_time:
+                self.motion_time = 0.0
+
+            for channel_state in self.channel_states:
+                interpolation_time = 0.0
+
+                # different keyframes, calculate delta and normalize, switch keyframes if needed
+                if channel_state.next_keyframe != channel_state.prev_keyframe:
+                    t0 = channel_state.motion_channel.time_series[
+                        channel_state.prev_keyframe
+                    ]
+
+                    if self.motion_time < t0:
+                        channel_state.prev_keyframe = 0
+                        t0 = channel_state.motion_channel.time_series[0]
+                        if channel_state.motion_channel.num_keyframes > 1:
+                            channel_state.next_keyframe = 1
+                        else:
+                            channel_state.next_keyframe = 0
+
+                    t1 = channel_state.motion_channel.time_series[
+                        channel_state.next_keyframe
+                    ]
+
+                    while (
+                        self.motion_time > t1
+                        and (channel_state.next_keyframe + 1)
+                        < channel_state.motion_channel.num_keyframes
+                    ):
+                        t0 = t1
+                        channel_state.next_keyframe += 1
+                        channel_state.prev_keyframe += 1
+                        t1 = channel_state.motion_channel.time_series[
+                            channel_state.next_keyframe
+                        ]
+
+                    interpolation_time = (self.motion_time - t0) / (t1 - t0)
+
+                match channel_state.motion_channel.target_property:
+                    case PssgMotionTree.TargetProperty.TRANSLATION:
+                        v0_offset = 3 * channel_state.prev_keyframe
+                        v1_offset = 3 * channel_state.next_keyframe
+                        v0 = Vector3(
+                            channel_state.motion_channel.data_series[v0_offset + 0],
+                            channel_state.motion_channel.data_series[v0_offset + 1],
+                            channel_state.motion_channel.data_series[v0_offset + 2],
+                        )
+                        v1 = Vector3(
+                            channel_state.motion_channel.data_series[v1_offset + 0],
+                            channel_state.motion_channel.data_series[v1_offset + 1],
+                            channel_state.motion_channel.data_series[v1_offset + 2],
+                        )
+
+                        channel_state.node_ref.translation = Vector3.lerp(
+                            v0, v1, interpolation_time
+                        )
+
+                    case PssgMotionTree.TargetProperty.SCALE:
+                        v0_offset = 3 * channel_state.prev_keyframe
+                        v1_offset = 3 * channel_state.next_keyframe
+                        v0 = Vector3(
+                            channel_state.motion_channel.data_series[v0_offset + 0],
+                            channel_state.motion_channel.data_series[v0_offset + 1],
+                            channel_state.motion_channel.data_series[v0_offset + 2],
+                        )
+                        v1 = Vector3(
+                            channel_state.motion_channel.data_series[v1_offset + 0],
+                            channel_state.motion_channel.data_series[v1_offset + 1],
+                            channel_state.motion_channel.data_series[v1_offset + 2],
+                        )
+
+                        channel_state.node_ref.scale = Vector3.lerp(
+                            v0, v1, interpolation_time
+                        )
+
+                    case PssgMotionTree.TargetProperty.ROTATION:
+                        v0_offset = 4 * channel_state.prev_keyframe
+                        v1_offset = 4 * channel_state.next_keyframe
+                        v0 = Quaternion(
+                            channel_state.motion_channel.data_series[v0_offset + 0],
+                            channel_state.motion_channel.data_series[v0_offset + 1],
+                            channel_state.motion_channel.data_series[v0_offset + 2],
+                            channel_state.motion_channel.data_series[v0_offset + 3],
+                        )
+                        v1 = Quaternion(
+                            channel_state.motion_channel.data_series[v1_offset + 0],
+                            channel_state.motion_channel.data_series[v1_offset + 1],
+                            channel_state.motion_channel.data_series[v1_offset + 2],
+                            channel_state.motion_channel.data_series[v1_offset + 3],
+                        )
+
+                        channel_state.node_ref.rotation = Quaternion.slerp(
+                            v0, v1, interpolation_time
+                        )
+
         def _initialize_if_needed(self):
             if not self.gl_initialized:
                 self.gl_version = GL.glGetString(GL.GL_VERSION)
@@ -3769,6 +3948,8 @@ class PssgViewerFrame(wx.Frame):
                 self._init_pssg_model_resources()
 
                 logging.info(self.gl_static_program.uniforms)
+
+                self.last_tick = time.perf_counter()
 
         def _init_render_targets(self):
             vp_size = self.GetClientSize()
@@ -3876,12 +4057,13 @@ class PssgViewerFrame(wx.Frame):
             for id, rendernode in self.pssg_tree.rendernodes.items():
                 self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
                     PssgViewerFrame.SceneMesh.DEFAULT_SKINNED_LAYOUT,
-                    (ctypes.c_ubyte * len(rendernode.render_data_source.vertex_buffer)).from_buffer(
-                        rendernode.render_data_source.vertex_buffer
-                    ),
-                    (ctypes.c_ubyte * len(rendernode.render_data_source.index_buffer)).from_buffer(
-                        rendernode.render_data_source.index_buffer
-                    ),
+                    (
+                        ctypes.c_ubyte
+                        * len(rendernode.render_data_source.vertex_buffer)
+                    ).from_buffer(rendernode.render_data_source.vertex_buffer),
+                    (
+                        ctypes.c_ubyte * len(rendernode.render_data_source.index_buffer)
+                    ).from_buffer(rendernode.render_data_source.index_buffer),
                 )
                 self.pssg_meshes[id].start()
 
@@ -3938,6 +4120,55 @@ class PssgViewerFrame(wx.Frame):
             else:
                 return (Vector3(-1, -1, -1), Vector3(1, 1, 1))
 
+    class MotionListPanel(wx.Panel):
+        def __init__(self, parent):
+            super().__init__(parent)
+            self.data_view = wx.dataview.DataViewListCtrl(
+                self,
+                style=wx.dataview.DV_ROW_LINES
+                | wx.dataview.DV_VERT_RULES
+                | wx.dataview.DV_NO_HEADER
+                | wx.dataview.DV_SINGLE,
+            )
+            self.data_view.AppendTextColumn("motion name")
+
+            sizer = wx.BoxSizer(wx.VERTICAL)
+            sizer.Add(self.data_view, 1, wx.EXPAND)
+
+            self.SetSizer(sizer)
+
+        def set_items(self, items: list[str]):
+            self.data_view.DeleteAllItems()
+            for name in items:
+                self.data_view.AppendItem([name])
+
+    class MainSplitter(wx.SplitterWindow):
+        def __init__(self, parent):
+            super().__init__(parent, style=wx.SP_LIVE_UPDATE | wx.SP_3D)
+
+            self.SetMinimumPaneSize(50)
+
+            self.Bind(wx.EVT_SIZE, self._on_size)
+            self.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGING, self._on_sash_changing)
+
+        def _clamp_sash(self):
+            total = self.GetSize().width
+            max_sash = max(0, total - 480)
+
+            if self.GetSashPosition() > max_sash:
+                self.SetSashPosition(max_sash)
+
+        def _on_size(self, event: wx.SizeEvent):
+            event.Skip()
+            wx.CallAfter(self._clamp_sash)
+
+        def _on_sash_changing(self, event: wx.SplitterEvent):
+            total = self.GetSize().width
+            max_sash = max(0, total - 480)
+
+            if event.GetSashPosition() > max_sash:
+                event.SetSashPosition(max_sash)
+
     MENU_ORIENT_MATRICES = {
         1000: (False, "Orient Z-UP", MATRIX_ORIENT_Z_UP),
         1010: (False, "Orient Z-UP 90", MATRIX_ORIENT_Z_UP_90),
@@ -3971,8 +4202,31 @@ class PssgViewerFrame(wx.Frame):
         self.element = element
         self.anim_element = anim_element
 
-        self.canvas = self.PssgViewerCanvas(self, self.element, self.anim_element)
         self.SetMinSize(wx.Size(640, 480))
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        if anim_element is not None:
+            self.splitter = self.MainSplitter(self)
+            self.canvas = self.PssgViewerCanvas(
+                self.splitter, self.element, self.anim_element
+            )
+            self.motion_selector = self.MotionListPanel(self.splitter)
+
+            if self.canvas.pssg_anim_tree is not None:
+                self.motion_selector.set_items(
+                    [*self.canvas.pssg_anim_tree.animations.keys()]
+                )
+
+            self.motion_selector.data_view.Bind(
+                wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, self._on_select_motion
+            )
+
+            
+            sizer.Add(self.splitter, 1, wx.EXPAND | wx.ALL)
+            self.splitter.SplitVertically(self.motion_selector, self.canvas, 330)
+        else:
+            self.canvas = self.PssgViewerCanvas(self, self.element, self.anim_element)
+            sizer.Add(self.canvas, 1, wx.EXPAND)
 
         menu_bar = wx.MenuBar()
         file_menu = wx.Menu()
@@ -4002,9 +4256,6 @@ class PssgViewerFrame(wx.Frame):
 
         self.SetMenuBar(menu_bar)
         self.SetStatusBar(self.status_bar)
-
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sizer.Add(self.canvas, 1, wx.EXPAND)
         self.SetSizer(sizer)
 
         self.timer = wx.Timer(self)
@@ -4034,6 +4285,14 @@ class PssgViewerFrame(wx.Frame):
     def on_view_choice(self, event: wx.MenuEvent):
         _, _, matrrix = self.MENU_ORIENT_MATRICES[event.GetId()]
         self.canvas.orient_matrix = matrrix
+
+    def _on_select_motion(self, event: wx.dataview.DataViewEvent):
+        row = self.motion_selector.data_view.GetSelectedRow()
+        if row == wx.NOT_FOUND:
+            return
+
+        name = self.motion_selector.data_view.GetTextValue(row, 0)
+        self.canvas.play_motion(name)
 
 
 class PssgJsonEncoder(json.JSONEncoder):
