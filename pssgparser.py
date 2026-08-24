@@ -7,6 +7,7 @@ import json
 import dataclasses
 import ctypes
 import math
+import xml.etree.ElementTree
 
 from array import array
 from enum import Enum, auto
@@ -218,6 +219,21 @@ BASE_ELEMENT_TYPES: list[PssgBaseElement] = [
     PssgBaseElement("TEXTUREMIPMAP", PssgElementType.BYTE),
     PssgBaseElement("TRANSFORM", PssgElementType.FLOAT),
     PssgBaseElement("VISIBLERENDERNODE", PssgElementType.NONE),
+    PssgBaseElement("ANIMATION", PssgElementType.NONE),
+    PssgBaseElement("CHANNELREF", PssgElementType.NONE),
+    PssgBaseElement("CONSTANTCHANNEL", PssgElementType.NONE),
+    PssgBaseElement("ANIMATIONCHANNEL", PssgElementType.NONE),
+    PssgBaseElement("ANIMATIONCHANNELDATABLOCK", PssgElementType.NONE),
+    PssgBaseElement("KEYS", PssgElementType.BYTE),
+    PssgBaseElement("ANIMATIONSET", PssgElementType.NONE),
+    PssgBaseElement("ANIMATIONREF", PssgElementType.NONE),
+    PssgBaseElement("MODIFIERNETWORK", PssgElementType.NONE),
+    PssgBaseElement("MODIFIERNETWORKENTRY", PssgElementType.NONE),
+    PssgBaseElement("MODIFIERNETWORKCONNECTION", PssgElementType.NONE),
+    PssgBaseElement("MODIFIERNETWORKINSTANCEDYNAMICSTREAM", PssgElementType.NONE),
+    PssgBaseElement("MODIFIERNETWORKINSTANCEUNIQUEINPUT", PssgElementType.NONE),
+    PssgBaseElement("MODIFIERNETWORKINSTANCEDYNAMICSTREAMTYPE", PssgElementType.NONE),
+    PssgBaseElement("USERDATA", PssgElementType.NONE),
 ]
 
 
@@ -527,6 +543,42 @@ BASE_ATTRIBUTE_TYPES: list[PssgBaseAttribute] = [
     PssgBaseAttribute("TEXTURE", "mipZeroAbsent", PssgAttributeType.INT),
     PssgBaseAttribute("TEXTUREIMAGEBLOCK", "typename", PssgAttributeType.STRING),
     PssgBaseAttribute("TEXTUREIMAGEBLOCK", "size", PssgAttributeType.INT),
+    PssgBaseAttribute("ANIMATION", "channelCount", PssgAttributeType.INT),
+    PssgBaseAttribute("ANIMATION", "constantChannelCount", PssgAttributeType.INT),
+    PssgBaseAttribute("ANIMATION", "constantChannelStartTime", PssgAttributeType.FLOAT),
+    PssgBaseAttribute("ANIMATION", "constantChannelEndTime", PssgAttributeType.FLOAT),
+    PssgBaseAttribute("CHANNELREF", "channel", PssgAttributeType.STRING),
+    PssgBaseAttribute("CHANNELREF", "targetName", PssgAttributeType.STRING),
+    PssgBaseAttribute("CONSTANTCHANNEL", "targetName", PssgAttributeType.STRING),
+    PssgBaseAttribute("CONSTANTCHANNEL", "keyType", PssgAttributeType.STRING),
+    PssgBaseAttribute("ANIMATIONCHANNEL", "timeBlock", PssgAttributeType.STRING),
+    PssgBaseAttribute("ANIMATIONCHANNEL", "valueBlock", PssgAttributeType.STRING),
+    PssgBaseAttribute("ANIMATIONCHANNELDATABLOCK", "keyCount", PssgAttributeType.INT),
+    PssgBaseAttribute("ANIMATIONCHANNELDATABLOCK", "keyType", PssgAttributeType.STRING),
+    PssgBaseAttribute("ANIMATIONSET", "animationCount", PssgAttributeType.INT),
+    PssgBaseAttribute("ANIMATIONREF", "animation", PssgAttributeType.STRING),
+    PssgBaseAttribute("MODIFIERNETWORK", "modifierCount", PssgAttributeType.INT),
+    PssgBaseAttribute("MODIFIERNETWORK", "streamingStrategy", PssgAttributeType.STRING),
+    PssgBaseAttribute("MODIFIERNETWORKENTRY", "name", PssgAttributeType.STRING),
+    PssgBaseAttribute("MODIFIERNETWORKCONNECTION", "modifier", PssgAttributeType.INT),
+    PssgBaseAttribute("MODIFIERNETWORKCONNECTION", "stream", PssgAttributeType.INT),
+    PssgBaseAttribute(
+        "MODIFIERNETWORKINSTANCEUNIQUEINPUT", "uniqueInputSource", PssgAttributeType.INT
+    ),
+    PssgBaseAttribute(
+        "MODIFIERNETWORKINSTANCEUNIQUEINPUT", "uniqueInputStream", PssgAttributeType.INT
+    ),
+    PssgBaseAttribute(
+        "MODIFIERNETWORKINSTANCEUNIQUEINPUT",
+        "uniqueInputElementSize",
+        PssgAttributeType.INT,
+    ),
+    PssgBaseAttribute(
+        "MODIFIERNETWORKINSTANCEDYNAMICSTREAMTYPE", "type", PssgAttributeType.STRING
+    ),
+    PssgBaseAttribute("USERDATA", "object", PssgAttributeType.STRING),
+    PssgBaseAttribute("TYPEINFO", "typeName", PssgAttributeType.STRING),
+    PssgBaseAttribute("TYPEINFO", "typeCount", PssgAttributeType.INT),
 ]
 
 
@@ -1963,6 +2015,13 @@ def pssg_transmute_buffer(
 
 class PssgModelTree:
     @dataclass
+    class PssgRenderDataSource:
+        vertex_buffer: bytearray = field(default_factory=bytearray)
+        index_buffer: bytearray = field(default_factory=bytearray)
+        num_vertices: int = 0
+        num_indices: int = 0
+
+    @dataclass
     class PssgModelNode:
         id: str
 
@@ -1985,11 +2044,14 @@ class PssgModelTree:
 
     @dataclass
     class PssgModelRenderNode(PssgModelNode):
-        vertex_buffer: bytearray = field(default_factory=bytearray)
-        index_buffer: bytearray = field(default_factory=bytearray)
-        num_vertices: int = 0
-        num_indices: int = 0
+        render_data_source: PssgModelTree.PssgRenderDataSource = field(
+            default_factory=lambda: PssgModelTree.PssgRenderDataSource()
+        )
         texture: Optional[PssgDecodedTexture] = None
+
+    @dataclass
+    class PssgModelMorphNode(PssgModelRenderNode):
+        morph_targets: list[PssgModelTree.PssgRenderDataSource] = field(default_factory=list)
 
     class PssgSkinJoint(NamedTuple):
         joint_id: str
@@ -2015,6 +2077,13 @@ class PssgModelTree:
     rendernodes: dict[str, PssgModelRenderNode] = {}
     skinnednodes: dict[str, PssgModelSkinnedNode] = {}
     jointnodes: dict[str, PssgModelNode] = {}
+
+    pssg_cache_render_data_source: dict[str, PssgElement] = {}
+    pssg_cache_shader_instance: dict[str, PssgElement] = {}
+    pssg_cache_datablock: dict[str, PssgElement] = {}
+    ppsg_cache_texture: dict[str, PssgElement] = {}
+    pssg_cache_shader_group: dict[str, PssgElement] = {}
+    pssg_cache_skeleton: dict[str, PssgElement] = {}
 
     def __init__(self, element: PssgElement):
         if element.name != "PSSGDATABASE":
@@ -2050,6 +2119,8 @@ class PssgModelTree:
         pssg_root = self.pssg_node_library.find_child("ROOTNODE")
         if pssg_root is None:
             raise Exception("ROOTNODE was not found in the node library")
+
+        self._init_pssg_cache()
 
         self.root = self._parse_pssg_node(pssg_root)
         self.compute_transforms()
@@ -2152,72 +2223,68 @@ class PssgModelTree:
 
         return result
 
-    def _find_pssg_render_data_source(self, id: str) -> Optional[PssgElement]:
+    def _init_pssg_cache(self):
         for child in self.pssg_source_library.children:
-            if child.name != "RENDERDATASOURCE":
-                pass
+            if child.name == "RENDERDATASOURCE":
+                data_source_id = str(child.get_attribute("id").value)
+                self.pssg_cache_render_data_source[data_source_id] = child
 
-            data_source_id = str(child.get_attribute("id").value)
-            if data_source_id == id:
-                return child
+        for child in self.pssg_material_library.children:
+            if child.name == "SHADERINSTANCE":
+                shader_instance_id = str(child.get_attribute("id").value)
+                self.pssg_cache_shader_instance[shader_instance_id] = child
+
+        for child in self.pssg_buffer_library.children:
+            if child.name == "DATABLOCK":
+                data_block_id = str(child.get_attribute("id").value)
+                self.pssg_cache_datablock[data_block_id] = child
+            elif child.name == "TEXTURE":
+                texture_id = str(child.get_attribute("id").value)
+                self.ppsg_cache_texture[texture_id] = child
+
+        for child in self.pssg_shader_library.children:
+            if child.name == "SHADERGROUP":
+                shader_group_id = str(child.get_attribute("id").value)
+                self.pssg_cache_shader_group[shader_group_id] = child
+
+        for child in self.pssg_skeleton_library.children:
+            if child.name == "SKELETON":
+                skeleton_id = str(child.get_attribute("id").value)
+                self.pssg_cache_skeleton[skeleton_id] = child
+
+    def _find_pssg_render_data_source(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_render_data_source:
+            return self.pssg_cache_render_data_source[id]
 
         return None
 
     def _find_pssg_shader_instance(self, id: str) -> Optional[PssgElement]:
-        for child in self.pssg_material_library.children:
-            if child.name != "SHADERINSTANCE":
-                pass
-
-            shader_instance_id = str(child.get_attribute("id").value)
-            if shader_instance_id == id:
-                return child
+        if id in self.pssg_cache_shader_instance:
+            return self.pssg_cache_shader_instance[id]
 
         return None
 
     def _find_pssg_data_block(self, id: str) -> Optional[PssgElement]:
-        for child in self.pssg_buffer_library.children:
-            if child.name != "DATABLOCK":
-                pass
-
-            data_block_id = str(child.get_attribute("id").value)
-            if data_block_id == id:
-                return child
+        if id in self.pssg_cache_datablock:
+            return self.pssg_cache_datablock[id]
 
         return None
 
     def _find_pssg_texture(self, id: str) -> Optional[PssgElement]:
-        textures = self.pssg_buffer_library.find_children("TEXTURE")
-        for texture in textures:
-            texture_id = texture.find_attribute("id")
-            if texture_id is None:
-                continue
-
-            if texture_id.value == id:
-                return texture
+        if id in self.ppsg_cache_texture:
+            return self.ppsg_cache_texture[id]
 
         return None
 
     def _find_pssg_shader_group(self, id: str) -> Optional[PssgElement]:
-        shader_groups = self.pssg_shader_library.find_children("SHADERGROUP")
-        for shader_group in shader_groups:
-            shader_group_id = shader_group.find_attribute("id")
-            if shader_group_id is None:
-                continue
-
-            if shader_group_id.value == id:
-                return shader_group
+        if id in self.pssg_cache_shader_group:
+            return self.pssg_cache_shader_group[id]
 
         return None
 
     def _find_pssg_skeleton(self, id: str) -> Optional[PssgElement]:
-        skeletons = self.pssg_skeleton_library.find_children("SKELETON")
-        for skeleton in skeletons:
-            skeleton_id = skeleton.find_attribute("id")
-            if skeleton_id is None:
-                continue
-
-            if skeleton_id.value == id:
-                return skeleton
+        if id in self.pssg_cache_skeleton:
+            return self.pssg_cache_skeleton[id]
 
         return None
 
@@ -2270,8 +2337,8 @@ class PssgModelTree:
                 node.texture = self.textures[texture_id]
 
     def _parse_pssg_render_data_source(
-        self, node: PssgModelRenderNode, render_data_source: PssgElement
-    ):
+        self, render_data_source: PssgElement
+    ) -> PssgRenderDataSource:
         render_data_source_id = render_data_source.get_attribute("id").value
         render_idx_source = render_data_source.find_child("RENDERINDEXSOURCE")
         if render_idx_source is None:
@@ -2386,22 +2453,26 @@ class PssgModelTree:
                 "<3f", vertex_buffer, i * VERTEX_STRIDE + COLOR_OFFSET, 1.0, 1.0, 1.0
             )
 
-        node.vertex_buffer = vertex_buffer
-        node.num_vertices = num_vertices
-        node.index_buffer = bytearray(UINT_SIZE * indices_count)
-        node.num_indices = indices_count
+        result = self.PssgRenderDataSource()
+
+        result.vertex_buffer = vertex_buffer
+        result.num_vertices = num_vertices
+        result.index_buffer = bytearray(UINT_SIZE * indices_count)
+        result.num_indices = indices_count
 
         pssg_transmute_buffer(
             src_data=indices,
             src_type=PSSG_KNOWN_ARRAY_TYPES[indices_format],
             src_stride=0,
             src_offset=0,
-            dst_data=node.index_buffer,
+            dst_data=result.index_buffer,
             dst_type=PssgArrayBufferType.UINT,
             dst_stride=4,
             dst_offset=0,
             count=indices_count,
         )
+
+        return result
 
     def _parse_pssg_render_stream_instance(
         self, node: PssgModelRenderNode, element: PssgElement
@@ -2448,11 +2519,17 @@ class PssgModelTree:
             )
 
         self._parse_pssg_shader_instance(node, shader_instance)
-        self._parse_pssg_render_data_source(node, render_data_source)
+        node.render_data_source = self._parse_pssg_render_data_source(render_data_source)
 
     def _parse_pssg_render_node(self, node: PssgElement) -> PssgModelNode:
         node_id = node.get_attribute("id").value
         result = self.PssgModelRenderNode(id=node_id)
+
+        morph_modifier = node.find_child("MODIFIERNETWORKINSTANCE")
+        if morph_modifier is not None:
+            modifier_network = str(morph_modifier.get_attribute("network").value)
+            if "morph" in modifier_network:
+                logging.warning("rendernode %s has morph targets", node_id)
 
         for child in node.children:
             if not self._parse_pssg_node_base(node, child, result):
@@ -2506,7 +2583,7 @@ class PssgModelTree:
             raise Exception(f"shader instance {shader_instance_id} does not exist")
 
         self._parse_pssg_shader_instance(result, shader_instance)
-        self._parse_pssg_render_data_source(result, render_data_source)
+        result.render_data_source = self._parse_pssg_render_data_source(render_data_source)
 
         skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
         skeleton = self._find_pssg_skeleton(skeleton_id)
@@ -2551,6 +2628,281 @@ class PssgModelTree:
 
     def export_as_gltf(self, output_file: str):
         raise NotImplementedError()
+
+
+class PssgMotionTree:
+    class TargetProperty(Enum):
+        TRANSLATION = 0
+        ROTATION = 1
+        SCALE = 2
+        MORPHWEIGHT1 = 3
+
+    @dataclass
+    class AnimationChannel:
+        target_node: str
+        target_property: PssgMotionTree.TargetProperty
+        num_keyframes: int
+        time_series: list[float]
+        data_series: list[float]
+
+    @dataclass
+    class Animation:
+        id: str
+        start_time: float
+        end_time: float
+        channels: list[PssgMotionTree.AnimationChannel]
+
+    @dataclass
+    class AnimationSet:
+        animations: list[PssgMotionTree.Animation]
+
+    pssg_libraries: list[PssgElement] = []
+    pssg_file: PssgElement
+    pssg_animation_library: PssgElement
+    pssg_channel_library: PssgElement
+    pssg_datablock_library: PssgElement
+    pssg_animset_library: PssgElement
+
+    animations: dict[str, Animation] = {}
+    animation_sets: dict[str, AnimationSet] = {}
+
+    pssg_cache_animation: dict[str, PssgElement] = {}
+    pssg_cache_channel: dict[str, PssgElement] = {}
+    pssg_cache_datablock: dict[str, PssgElement] = {}
+    pssg_cache_animset: dict[str, PssgElement] = {}
+
+    def __init__(self, element: PssgElement):
+        if element.name != "PSSGDATABASE":
+            raise Exception(f"expected pssg PSSGDATABASE element, got {element.type}")
+
+        self.pssg_file = element
+        self.pssg_animation_library = self._find_library("ANIMATION")
+        self.pssg_channel_library = self._find_library("ANIMATIONCHANNEL")
+        self.pssg_datablock_library = self._find_library("ANIMATIONCHANNELDATABLOCK")
+        self.pssg_animset_library = self._find_library("ANIMATIONHIERARCHYNODE")
+
+        self._init_pssg_cache()
+
+        # parse all animations
+        for _, animation in self.pssg_cache_animation.items():
+            self._parse_pssg_animation(animation)
+
+        logging.info("found total of %d animations", len(self.animations))
+
+    def _init_pssg_cache(self):
+        for child in self.pssg_animation_library.children:
+            if child.name != "ANIMATION":
+                continue
+
+            animation_id = str(child.get_attribute("id").value)
+            self.pssg_cache_animation[animation_id] = child
+
+        for child in self.pssg_channel_library.children:
+            if child.name != "ANIMATIONCHANNEL":
+                continue
+
+            channel_id = str(child.get_attribute("id").value)
+            self.pssg_cache_channel[channel_id] = child
+
+        for child in self.pssg_datablock_library.children:
+            if child.name != "ANIMATIONCHANNELDATABLOCK":
+                continue
+
+            datablock_id = str(child.get_attribute("id").value)
+            self.pssg_cache_datablock[datablock_id] = child
+
+        for child in self.pssg_animset_library.children:
+            if child.name == "ANIMATIONSET":
+                continue
+
+            animset_id = str(child.get_attribute("id").value)
+            self.pssg_cache_animset[animset_id] = child
+
+    def _find_pssg_animation(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_animation:
+            return self.pssg_cache_animation[id]
+
+        return None
+
+    def _find_pssg_anim_channel(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_channel:
+            return self.pssg_cache_channel[id]
+
+        return None
+
+    def _find_pssg_anim_datablock(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_datablock:
+            return self.pssg_cache_datablock[id]
+
+        return None
+
+    def _find_pssg_animset(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_animset:
+            return self.pssg_cache_animset[id]
+
+        return None
+
+    def _parse_pssg_animation(self, element: PssgElement) -> Animation:
+        animation_id = str(element.get_attribute("id").value)
+        channel_count = int(element.get_attribute("channelCount").value)
+        const_channel_count = int(element.get_attribute("constantChannelCount").value)
+        const_channel_start = float(
+            element.get_attribute("constantChannelStartTime").value
+        )
+        const_channel_end = float(element.get_attribute("constantChannelEndTime").value)
+
+        result = self.Animation(
+            id=animation_id,
+            start_time=const_channel_start,
+            end_time=const_channel_end,
+            channels=[],
+        )
+
+        for child in element.children:
+            match child.name:
+                case "CHANNELREF":
+                    channel_id = child.get_attribute("channel").value.lstrip("#")
+                    target_id = child.get_attribute("targetName").value
+                    channel = self._find_pssg_anim_channel(channel_id)
+
+                    if channel is None:
+                        raise Exception(f"channel with id {channel_id} does not exist")
+
+                    time_block_id = channel.get_attribute("timeBlock").value.lstrip("#")
+                    value_block_id = channel.get_attribute("valueBlock").value.lstrip(
+                        "#"
+                    )
+
+                    time_block = self._find_pssg_anim_datablock(time_block_id)
+                    value_block = self._find_pssg_anim_datablock(value_block_id)
+
+                    if time_block is None:
+                        raise Exception(f"time block {time_block_id} does not exist")
+
+                    if value_block is None:
+                        raise Exception(f"value block {value_block_id} does not exist")
+
+                    time_block_key_count = int(
+                        time_block.get_attribute("keyCount").value
+                    )
+                    time_block_key_type = str(time_block.get_attribute("keyType").value)
+                    value_block_key_count = int(
+                        value_block.get_attribute("keyCount").value
+                    )
+                    value_block_key_type = str(
+                        value_block.get_attribute("keyType").value
+                    )
+
+                    if time_block_key_count != value_block_key_count:
+                        raise Exception(
+                            f"time block key count {time_block_key_count} is not the same as value block key count {value_block_key_count}"
+                        )
+
+                    if time_block_key_type != "Time":
+                        raise Exception(
+                            f"unexpected type for time block: {time_block_key_type}"
+                        )
+
+                    result_channel = self.AnimationChannel(
+                        target_node=target_id,
+                        target_property=self.TargetProperty.TRANSLATION,
+                        num_keyframes=time_block_key_count,
+                        time_series=[],
+                        data_series=[],
+                    )
+
+                    match value_block_key_type:
+                        case "Translation":
+                            result_channel.target_property = (
+                                self.TargetProperty.TRANSLATION
+                            )
+                        case "Rotation":
+                            result_channel.target_property = (
+                                self.TargetProperty.ROTATION
+                            )
+                        case "Scale":
+                            result_channel.target_property = self.TargetProperty.SCALE
+                        case "MorphTargetWeight1":
+                            result_channel.target_property = self.TargetProperty.MORPHWEIGHT1
+                        case _:
+                            logging.error(
+                                f"invalid value block type {value_block_key_type}"
+                            )
+
+                    time_series_data = time_block.find_child("KEYS")
+                    value_series_data = value_block.find_child("KEYS")
+
+                    if time_series_data is None:
+                        raise Exception(f"time series does not have any data")
+
+                    if value_series_data is None:
+                        raise Exception(f"value series does not have any data")
+
+                    num_scalars_time_series = len(time_series_data.value) // 4
+                    num_scalars_value_series = len(value_series_data.value) // 4
+
+                    result_channel.time_series = [*struct.unpack_from(f">{num_scalars_time_series}f", time_series_data.value)]
+                    result_channel.data_series = [*struct.unpack_from(f">{num_scalars_value_series}f", value_series_data.value)]
+
+                    result.channels.append(result_channel)
+
+                case "CONSTANTCHANNEL":
+                    target_id = child.get_attribute("targetName").value.lstrip("#")
+                    value_type = child.get_attribute("keyType").value
+
+                    result_channel = self.AnimationChannel(
+                        target_node=target_id,
+                        target_property=self.TargetProperty.TRANSLATION,
+                        num_keyframes=1,
+                        time_series=[0.0],
+                        data_series=[],
+                    )
+
+                    match value_type:
+                        case "Translation":
+                            result_channel.target_property = (
+                                self.TargetProperty.TRANSLATION
+                            )
+                        case "Rotation":
+                            result_channel.target_property = (
+                                self.TargetProperty.ROTATION
+                            )
+                        case "Scale":
+                            result_channel.target_property = self.TargetProperty.SCALE
+                        case "MorphTargetWeight1":
+                            result_channel.target_property = self.TargetProperty.MORPHWEIGHT1
+                        case _:
+                            logging.error(
+                                f"invalid value block type {value_type}"
+                            )
+
+                    value_attrib = child.get_attribute("value")
+                    num_scalars = len(value_attrib.value) // 4
+                    result_channel.data_series = [*struct.unpack_from(f">{num_scalars}f", value_attrib.value)]
+
+                case _:
+                    raise Exception(f"unknown animation channel type {child.name}")
+
+        self.animations[animation_id] = result
+        return result
+
+    def _parse_pssg_animation_set(self, element: PssgElement):
+        animation_set_id = str(element.get_attribute("id").value)
+        animation_refs = element.find_children("ANIMATIONREF")
+
+    def _find_library(self, type: str) -> PssgElement:
+        if len(self.pssg_libraries) == 0:
+            self.pssg_libraries = self.pssg_file.find_children("LIBRARY")
+
+        for library in self.pssg_libraries:
+            library_type = library.find_attribute("type")
+            if library_type is None:
+                continue
+
+            if library_type.value == type:
+                return library
+
+        raise Exception(f"cannot find a pssg library of type {type}")
 
 
 SCREEN_VERTEX_SHADER = """#version 400
@@ -3172,6 +3524,7 @@ class PssgViewerFrame(wx.Frame):
         proj_matrix: Matrix4x4 = Matrix4x4.identity()
 
         pssg_tree: PssgModelTree
+        pssg_anim_tree: Optional[PssgMotionTree] = None
         pssg_textures: dict[str, PssgViewerFrame.SceneTexture] = {}
         pssg_meshes: dict[str, PssgViewerFrame.SceneMesh] = {}
         pssg_skins: dict[str, PssgViewerFrame.ScenePose] = {}
@@ -3184,7 +3537,9 @@ class PssgViewerFrame(wx.Frame):
         fb_width: int = 0
         fb_height: int = 0
 
-        def __init__(self, parent, element: PssgElement):
+        def __init__(
+            self, parent, element: PssgElement, anim_element: Optional[PssgElement]
+        ):
             gl_attrib_list: list[int] = [
                 glcanvas.WX_GL_CORE_PROFILE,
                 glcanvas.WX_GL_MAJOR_VERSION,
@@ -3225,6 +3580,9 @@ class PssgViewerFrame(wx.Frame):
             )
 
             self.pssg_tree = PssgModelTree(element)
+
+            if anim_element is not None:
+                self.pssg_anim_tree = PssgMotionTree(anim_element)
 
         def on_mouse_scroll(self, event: wx.MouseEvent):
             delta = event.GetWheelRotation() / event.GetWheelDelta()
@@ -3306,7 +3664,10 @@ class PssgViewerFrame(wx.Frame):
                     matrix_offs = 0
                     for joint_id, inverse_bind in node.skin_joints:
                         if joint_id in self.pssg_tree.jointnodes:
-                            offset_matrix = self.pssg_tree.jointnodes[joint_id].model_matrix * inverse_bind
+                            offset_matrix = (
+                                self.pssg_tree.jointnodes[joint_id].model_matrix
+                                * inverse_bind
+                            )
                             gl_skin.set_matrix(
                                 matrix_offs,
                                 offset_matrix,
@@ -3515,11 +3876,11 @@ class PssgViewerFrame(wx.Frame):
             for id, rendernode in self.pssg_tree.rendernodes.items():
                 self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
                     PssgViewerFrame.SceneMesh.DEFAULT_SKINNED_LAYOUT,
-                    (ctypes.c_ubyte * len(rendernode.vertex_buffer)).from_buffer(
-                        rendernode.vertex_buffer
+                    (ctypes.c_ubyte * len(rendernode.render_data_source.vertex_buffer)).from_buffer(
+                        rendernode.render_data_source.vertex_buffer
                     ),
-                    (ctypes.c_ubyte * len(rendernode.index_buffer)).from_buffer(
-                        rendernode.index_buffer
+                    (ctypes.c_ubyte * len(rendernode.render_data_source.index_buffer)).from_buffer(
+                        rendernode.render_data_source.index_buffer
                     ),
                 )
                 self.pssg_meshes[id].start()
@@ -3592,7 +3953,12 @@ class PssgViewerFrame(wx.Frame):
         1110: (False, "Orient X-UP 270", MATRIX_ORIENT_X_UP_270),
     }
 
-    def __init__(self, title: str, element: PssgElement):
+    def __init__(
+        self,
+        title: str,
+        element: PssgElement,
+        anim_element: Optional[PssgElement] = None,
+    ):
         wx.Frame.__init__(
             self,
             None,
@@ -3603,7 +3969,9 @@ class PssgViewerFrame(wx.Frame):
         )
 
         self.element = element
-        self.canvas = self.PssgViewerCanvas(self, self.element)
+        self.anim_element = anim_element
+
+        self.canvas = self.PssgViewerCanvas(self, self.element, self.anim_element)
         self.SetMinSize(wx.Size(640, 480))
 
         menu_bar = wx.MenuBar()
@@ -3685,6 +4053,33 @@ def _write_pssg_as_json(pssg_element: PssgElement, output_path: pathlib.Path):
         json.dump(pssg_element, f, cls=PssgJsonEncoder, indent=4)
 
 
+def _pssg_value_to_str(value: Any) -> str:
+    return value.hex() if isinstance(value, (bytes, bytearray)) else str(value)
+
+
+def _pssg_to_xml(pssg_element: PssgElement) -> xml.etree.ElementTree.Element:
+    xml_el = xml.etree.ElementTree.Element(pssg_element.name)
+
+    for attr in pssg_element.attributes:
+        xml_el.set(attr.name, _pssg_value_to_str(attr.value))
+
+    has_children = pssg_element.type in (PssgElementType.UNKNOWN, PssgElementType.NONE)
+
+    if has_children:
+        for child in pssg_element.children:
+            xml_el.append(_pssg_to_xml(child))
+    else:
+        xml_el.text = _pssg_value_to_str(pssg_element.value)
+
+    return xml_el
+
+
+def _write_pssg_to_xml(pssg_element: PssgElement, output: pathlib.Path):
+    tree = xml.etree.ElementTree.ElementTree(_pssg_to_xml(pssg_element))
+    xml.etree.ElementTree.indent(tree, space="  ")
+    tree.write(output, encoding="utf-8", xml_declaration=True)
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.DEBUG,
@@ -3696,11 +4091,18 @@ def main() -> int:
         prog="pssgparser", description="simple python pssg parser for atelier meruru"
     )
     arg_parser.add_argument("-i", "--input", required=True, help="input pssg filename")
+    arg_parser.add_argument(
+        "-m", "--motion", required=False, help="input pssg file with motion"
+    )
     args = arg_parser.parse_args()
 
     input_filename = args.input
     try:
         pssg_reader = PssgReader(input_filename)
+
+        motion_reader = None
+        if args.motion is not None:
+            motion_reader = PssgReader(args.motion)
 
         logging.info("loaded pssg file")
         # for pssg_schema_element in pssg_reader.pssg_schema_elements:
@@ -3710,7 +4112,11 @@ def main() -> int:
         #     logging.info("found pssg schema attribute %s", pssg_schema_attrib)
 
         viewer_app = wx.App()
-        viewer_app_frame = PssgViewerFrame(input_filename, pssg_reader.pssg_tree)
+        viewer_app_frame = PssgViewerFrame(
+            input_filename,
+            pssg_reader.pssg_tree,
+            motion_reader.pssg_tree if motion_reader is not None else None,
+        )
         viewer_app_frame.Show()
         viewer_app.MainLoop()
 
