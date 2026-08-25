@@ -2594,13 +2594,17 @@ class PssgModelTree:
                 raise Exception(f"skin node {node_id} is missing RENDERINSTANCESOURCE")
 
             shader_instance_id: str = network_instance.get_attribute("shader").value
-            render_data_src_id: str = render_instance_source.get_attribute("source").value
+            render_data_src_id: str = render_instance_source.get_attribute(
+                "source"
+            ).value
 
             render_data_source = self._find_pssg_render_data_source(
                 render_data_src_id.lstrip("#")
             )
             if render_data_source is None:
-                raise Exception(f"render data source {render_data_src_id} does not exist")
+                raise Exception(
+                    f"render data source {render_data_src_id} does not exist"
+                )
 
             shader_instance = self._find_pssg_shader_instance(
                 shader_instance_id.lstrip("#")
@@ -2627,7 +2631,9 @@ class PssgModelTree:
 
             for i in range(len(skinjoints)):
                 inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
-                skin_joint_id = str(skinjoints[i].get_attribute("joint").value.lstrip("#"))
+                skin_joint_id = str(
+                    skinjoints[i].get_attribute("joint").value.lstrip("#")
+                )
                 result.skin_joints.append(
                     PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
                 )
@@ -3782,7 +3788,7 @@ class PssgViewerFrame(wx.Frame):
 
                 for render_instance in node.render_data_sources:
                     pssg_gl_mesh = self.pssg_meshes[render_instance.id]
-                    
+
                     if render_instance.texture is not None:
                         pssg_gl_texture = self.pssg_textures[render_instance.texture.id]
                         pssg_gl_texture.bind(0)
@@ -4095,13 +4101,12 @@ class PssgViewerFrame(wx.Frame):
             for id, render_instance in self.pssg_tree.render_instances.items():
                 self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
                     PssgViewerFrame.SceneMesh.DEFAULT_SKINNED_LAYOUT,
-                    (
-                        ctypes.c_ubyte
-                        * len(render_instance.vertex_buffer)
-                    ).from_buffer(render_instance.vertex_buffer),
-                    (
-                        ctypes.c_ubyte * len(render_instance.index_buffer)
-                    ).from_buffer(render_instance.index_buffer),
+                    (ctypes.c_ubyte * len(render_instance.vertex_buffer)).from_buffer(
+                        render_instance.vertex_buffer
+                    ),
+                    (ctypes.c_ubyte * len(render_instance.index_buffer)).from_buffer(
+                        render_instance.index_buffer
+                    ),
                     render_instance.num_indices,
                 )
                 self.pssg_meshes[id].start()
@@ -4343,7 +4348,7 @@ class PssgJsonEncoder(json.JSONEncoder):
         return super().default(o)
 
 
-def _write_pssg_as_json(pssg_element: PssgElement, output_path: pathlib.Path):
+def _write_pssg_as_json(pssg_element: PssgElement, output_path: str):
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(pssg_element, f, cls=PssgJsonEncoder, indent=4)
 
@@ -4369,10 +4374,78 @@ def _pssg_to_xml(pssg_element: PssgElement) -> xml.etree.ElementTree.Element:
     return xml_el
 
 
-def _write_pssg_to_xml(pssg_element: PssgElement, output: pathlib.Path):
+def _write_pssg_to_xml(pssg_element: PssgElement, output: str):
     tree = xml.etree.ElementTree.ElementTree(_pssg_to_xml(pssg_element))
     xml.etree.ElementTree.indent(tree, space="  ")
     tree.write(output, encoding="utf-8", xml_declaration=True)
+
+
+PSSG_EXPORTERS = {
+    "json": _write_pssg_as_json,
+    "xml": _write_pssg_to_xml,
+}
+
+
+def _do_view(args) -> int:
+    model_filename = args.model
+    try:
+        pssg_reader = PssgReader(model_filename)
+
+        motion_reader = None
+        if args.motion is not None:
+            motion_reader = PssgReader(args.motion)
+
+        logging.info("loaded pssg file")
+
+        viewer_app = wx.App()
+        viewer_app_frame = PssgViewerFrame(
+            model_filename,
+            pssg_reader.pssg_tree,
+            motion_reader.pssg_tree if motion_reader is not None else None,
+        )
+        viewer_app_frame.Show()
+        viewer_app.MainLoop()
+
+    except Exception as e:
+        logging.error(
+            "failed to run pssg viewer, this might be an issue with an unsupported file OR a bug in the viewer program: %s",
+            str(e),
+        )
+        return 1
+
+    return 0
+
+
+def _do_pssg(args) -> int:
+    input_filename = args.input
+    output_filename = args.output
+
+    try:
+        pssg_reader = PssgReader(input_filename)
+        logging.info("loaded pssg file")
+
+        output_path = pathlib.Path(output_filename)
+        if output_path.is_dir():
+            raise Exception(f"{output_filename} is a directory")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_format = output_path.suffix.lstrip(".").lower()
+
+        if output_format not in PSSG_EXPORTERS:
+            raise Exception(
+                f"{output_filename} has invalid output format: {output_format}"
+            )
+
+        PSSG_EXPORTERS[output_format](pssg_reader.pssg_tree, output_path)
+
+    except Exception as e:
+        logging.error(
+            "failed to run pssg parser, this might be an issue with an unsupported file OR a bug in the viewer program: %s",
+            str(e),
+        )
+        return 1
+
+    return 0
 
 
 def main() -> int:
@@ -4383,40 +4456,46 @@ def main() -> int:
     )
 
     arg_parser = argparse.ArgumentParser(
-        prog="pssgparser", description="simple python pssg parser for atelier meruru"
+        prog="pssgparser",
+        description="simple python pssg utility for atelier meruru, made by wolftender (https://github.com/wolftender)",
     )
-    arg_parser.add_argument("-i", "--input", required=True, help="input pssg filename")
-    arg_parser.add_argument(
-        "-m", "--motion", required=False, help="input pssg file with motion"
+    arg_subparsers = arg_parser.add_subparsers(dest="command", required=True)
+
+    # view subcommand parser
+    arg_view_parser = arg_subparsers.add_parser(
+        "view",
+        help="file viewer module, provides a simple wxwidgets based 3d viewer for models",
     )
+    arg_view_parser.add_argument(
+        "--model", required=True, type=str, help="input filename for pssg model"
+    )
+    arg_view_parser.add_argument(
+        "--motion", required=False, type=str, help="input filename for pssg motions"
+    )
+
+    # pssg subcommand parser
+    arg_pssg_parser = arg_subparsers.add_parser(
+        "pssg",
+        help="pssg container parser mode, will not interpret the file structure only parse and validate the pssg file tree itself",
+    )
+    arg_pssg_parser.add_argument(
+        "--input", required=True, type=str, help="pssg input filename"
+    )
+    arg_pssg_parser.add_argument(
+        "--output",
+        required=False,
+        type=str,
+        help="parsed file structure will be written to this path",
+    )
+
     args = arg_parser.parse_args()
 
-    input_filename = args.input
-    try:
-        pssg_reader = PssgReader(input_filename)
+    match args.command:
+        case "view":
+            return _do_view(args)
 
-        motion_reader = None
-        if args.motion is not None:
-            motion_reader = PssgReader(args.motion)
-
-        logging.info("loaded pssg file")
-        # for pssg_schema_element in pssg_reader.pssg_schema_elements:
-        #     logging.info("found pssg schema element %s", pssg_schema_element)
-        #
-        # for pssg_schema_attrib in pssg_reader.pssg_schema_attribs:
-        #     logging.info("found pssg schema attribute %s", pssg_schema_attrib)
-
-        viewer_app = wx.App()
-        viewer_app_frame = PssgViewerFrame(
-            input_filename,
-            pssg_reader.pssg_tree,
-            motion_reader.pssg_tree if motion_reader is not None else None,
-        )
-        viewer_app_frame.Show()
-        viewer_app.MainLoop()
-
-    except Exception as e:
-        logging.error("failed to parse pssg file: %s", str(e))
+        case "pssg":
+            return _do_pssg(args)
 
     return 0
 
