@@ -3020,7 +3020,7 @@ uniform mat4 u_view;
 uniform mat4 u_world;
 
 layout (std140) uniform u_bones {
-    mat4 bone_matrix[200];
+    mat4 bone_matrix[300];
 };
 
 out VS_OUT {
@@ -4122,7 +4122,7 @@ class PssgViewerFrame(wx.Frame):
                 self.pssg_textures[id].start()
 
             for id, skinnode in self.pssg_tree.skinnednodes.items():
-                self.pssg_skins[id] = PssgViewerFrame.ScenePose(num_matrices=200)
+                self.pssg_skins[id] = PssgViewerFrame.ScenePose(num_matrices=300)
                 self.pssg_skins[id].start()
 
             # make the model fit the viewport easily
