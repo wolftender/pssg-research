@@ -2017,11 +2017,13 @@ def pssg_transmute_buffer(
 
 class PssgModelTree:
     @dataclass
-    class PssgRenderDataSource:
+    class PssgRenderInstance:
+        id: str
         vertex_buffer: bytearray = field(default_factory=bytearray)
         index_buffer: bytearray = field(default_factory=bytearray)
         num_vertices: int = 0
         num_indices: int = 0
+        texture: Optional[PssgDecodedTexture] = None
 
     @dataclass
     class PssgModelNode:
@@ -2046,14 +2048,13 @@ class PssgModelTree:
 
     @dataclass
     class PssgModelRenderNode(PssgModelNode):
-        render_data_source: PssgModelTree.PssgRenderDataSource = field(
-            default_factory=lambda: PssgModelTree.PssgRenderDataSource()
+        render_data_sources: list[PssgModelTree.PssgRenderInstance] = field(
+            default_factory=list
         )
-        texture: Optional[PssgDecodedTexture] = None
 
     @dataclass
     class PssgModelMorphNode(PssgModelRenderNode):
-        morph_targets: list[PssgModelTree.PssgRenderDataSource] = field(
+        morph_targets: list[PssgModelTree.PssgRenderInstance] = field(
             default_factory=list
         )
 
@@ -2082,6 +2083,7 @@ class PssgModelTree:
     rendernodes: dict[str, PssgModelRenderNode] = {}
     skinnednodes: dict[str, PssgModelSkinnedNode] = {}
     jointnodes: dict[str, PssgModelNode] = {}
+    render_instances: dict[str, PssgRenderInstance] = {}
 
     pssg_cache_render_data_source: dict[str, PssgElement] = {}
     pssg_cache_shader_instance: dict[str, PssgElement] = {}
@@ -2308,7 +2310,7 @@ class PssgModelTree:
         return None
 
     def _parse_pssg_shader_instance(
-        self, node: PssgModelRenderNode, shader_instance: PssgElement
+        self, render_instance: PssgRenderInstance, shader_instance: PssgElement
     ):
         # apply texture using shader instance input data
         shader_inputs = shader_instance.find_children("SHADERINPUT")
@@ -2326,9 +2328,9 @@ class PssgModelTree:
             if texture_id not in self.textures:
                 self.textures[texture_id] = PssgDecodedTexture(texture)
 
-            node.texture = self.textures[texture_id]
+            render_instance.texture = self.textures[texture_id]
 
-        if node.texture is not None:
+        if render_instance.texture is not None:
             return
 
         # texture still not bound, so search shader defaults instead
@@ -2353,11 +2355,11 @@ class PssgModelTree:
                 if texture_id not in self.textures:
                     self.textures[texture_id] = PssgDecodedTexture(texture)
 
-                node.texture = self.textures[texture_id]
+                render_instance.texture = self.textures[texture_id]
 
     def _parse_pssg_render_data_source(
         self, render_data_source: PssgElement
-    ) -> PssgRenderDataSource:
+    ) -> PssgRenderInstance:
         render_data_source_id = render_data_source.get_attribute("id").value
         render_idx_source = render_data_source.find_child("RENDERINDEXSOURCE")
         if render_idx_source is None:
@@ -2474,7 +2476,7 @@ class PssgModelTree:
                 "<3f", vertex_buffer, i * VERTEX_STRIDE + COLOR_OFFSET, 1.0, 1.0, 1.0
             )
 
-        result = self.PssgRenderDataSource()
+        result = self.PssgRenderInstance(id=render_data_source_id)
 
         result.vertex_buffer = vertex_buffer
         result.num_vertices = num_vertices
@@ -2493,6 +2495,7 @@ class PssgModelTree:
             count=indices_count,
         )
 
+        self.render_instances[render_data_source_id] = result
         return result
 
     def _parse_pssg_render_stream_instance(
@@ -2539,10 +2542,9 @@ class PssgModelTree:
                 f"shader instance {shader_instance_id.value} does not exist"
             )
 
-        self._parse_pssg_shader_instance(node, shader_instance)
-        node.render_data_source = self._parse_pssg_render_data_source(
-            render_data_source
-        )
+        render_instance = self._parse_pssg_render_data_source(render_data_source)
+        self._parse_pssg_shader_instance(render_instance, shader_instance)
+        node.render_data_sources.append(render_instance)
 
     def _parse_pssg_render_node(self, node: PssgElement) -> PssgModelNode:
         node_id = node.get_attribute("id").value
@@ -2582,53 +2584,53 @@ class PssgModelTree:
         # skinned draw nodes are some kind of modifier around regular buffers
         # we really don't care about parsing them properly, whats important
         # is the data they hold
-        network_instance = node.find_child("MODIFIERNETWORKINSTANCE")
-        if network_instance is None:
+        network_instances = node.find_children("MODIFIERNETWORKINSTANCE")
+        if len(network_instances) == 0:
             raise Exception(f"skin node {node_id} is missing MODIFIERNETWORKINSTANCE")
 
-        render_instance_source = network_instance.find_child("RENDERINSTANCESOURCE")
-        if render_instance_source is None:
-            raise Exception(f"skin node {node_id} is missing RENDERINSTANCESOURCE")
+        for network_instance in network_instances:
+            render_instance_source = network_instance.find_child("RENDERINSTANCESOURCE")
+            if render_instance_source is None:
+                raise Exception(f"skin node {node_id} is missing RENDERINSTANCESOURCE")
 
-        shader_instance_id: str = network_instance.get_attribute("shader").value
-        render_data_src_id: str = render_instance_source.get_attribute("source").value
+            shader_instance_id: str = network_instance.get_attribute("shader").value
+            render_data_src_id: str = render_instance_source.get_attribute("source").value
 
-        render_data_source = self._find_pssg_render_data_source(
-            render_data_src_id.lstrip("#")
-        )
-        if render_data_source is None:
-            raise Exception(f"render data source {render_data_src_id} does not exist")
-
-        shader_instance = self._find_pssg_shader_instance(
-            shader_instance_id.lstrip("#")
-        )
-        if shader_instance is None:
-            raise Exception(f"shader instance {shader_instance_id} does not exist")
-
-        self._parse_pssg_shader_instance(result, shader_instance)
-        result.render_data_source = self._parse_pssg_render_data_source(
-            render_data_source
-        )
-
-        skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
-        skeleton = self._find_pssg_skeleton(skeleton_id)
-        if skeleton is None:
-            raise Exception(f"missing skeleton with id {skeleton_id}")
-
-        skinjoints = node.find_children("SKINJOINT")
-        inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
-
-        if len(skinjoints) > len(inverse_binds):
-            raise Exception(
-                f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices"
+            render_data_source = self._find_pssg_render_data_source(
+                render_data_src_id.lstrip("#")
             )
+            if render_data_source is None:
+                raise Exception(f"render data source {render_data_src_id} does not exist")
 
-        for i in range(len(skinjoints)):
-            inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
-            skin_joint_id = str(skinjoints[i].get_attribute("joint").value.lstrip("#"))
-            result.skin_joints.append(
-                PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
+            shader_instance = self._find_pssg_shader_instance(
+                shader_instance_id.lstrip("#")
             )
+            if shader_instance is None:
+                raise Exception(f"shader instance {shader_instance_id} does not exist")
+
+            render_instance = self._parse_pssg_render_data_source(render_data_source)
+            self._parse_pssg_shader_instance(render_instance, shader_instance)
+            result.render_data_sources.append(render_instance)
+
+            skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
+            skeleton = self._find_pssg_skeleton(skeleton_id)
+            if skeleton is None:
+                raise Exception(f"missing skeleton with id {skeleton_id}")
+
+            skinjoints = node.find_children("SKINJOINT")
+            inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
+
+            if len(skinjoints) > len(inverse_binds):
+                raise Exception(
+                    f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices"
+                )
+
+            for i in range(len(skinjoints)):
+                inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
+                skin_joint_id = str(skinjoints[i].get_attribute("joint").value.lstrip("#"))
+                result.skin_joints.append(
+                    PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
+                )
 
         self.rendernodes[result.id] = result
         self.skinnednodes[result.id] = result
@@ -3012,7 +3014,7 @@ uniform mat4 u_view;
 uniform mat4 u_world;
 
 layout (std140) uniform u_bones {
-    mat4 bone_matrix[100];
+    mat4 bone_matrix[200];
 };
 
 out VS_OUT {
@@ -3746,6 +3748,7 @@ class PssgViewerFrame(wx.Frame):
                 if isinstance(node, PssgModelTree.PssgModelSkinnedNode):
                     self.gl_skinned_program.bind()
                     gl_current_program = self.gl_skinned_program
+                    gl_current_program.set_matrix("u_world", self.world_matrix)
 
                     # update and bind the skin
                     gl_skin = self.pssg_skins[node.id]
@@ -3770,26 +3773,27 @@ class PssgViewerFrame(wx.Frame):
                     self.gl_static_program.bind()
                     gl_current_program = self.gl_static_program
 
-                gl_current_program.set_matrix("u_world", self.world_matrix)
+                    world = self.world_matrix * node.model_matrix
+                    gl_current_program.set_matrix("u_world", world)
+
                 gl_current_program.set_matrix("u_view", self.view_matrix)
                 gl_current_program.set_matrix("u_projection", self.proj_matrix)
                 gl_current_program.set_vector4("u_color", (1.0, 1.0, 1.0, 1.0))
 
-                world = self.world_matrix * node.model_matrix
-                pssg_gl_mesh = self.pssg_meshes[node.id]
+                for render_instance in node.render_data_sources:
+                    pssg_gl_mesh = self.pssg_meshes[render_instance.id]
+                    
+                    if render_instance.texture is not None:
+                        pssg_gl_texture = self.pssg_textures[render_instance.texture.id]
+                        pssg_gl_texture.bind(0)
 
-                if node.texture is not None:
-                    pssg_gl_texture = self.pssg_textures[node.texture.id]
-                    pssg_gl_texture.bind(0)
+                        gl_current_program.set_flag("u_use_diffuse", True)
+                        gl_current_program.set_sampler("u_diffuse", 0)
+                    else:
+                        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+                        gl_current_program.set_flag("u_use_diffuse", False)
 
-                    gl_current_program.set_flag("u_use_diffuse", True)
-                    gl_current_program.set_sampler("u_diffuse", 0)
-                else:
-                    GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-                    gl_current_program.set_flag("u_use_diffuse", False)
-
-                gl_current_program.set_matrix("u_world", world)
-                pssg_gl_mesh.draw()
+                    pssg_gl_mesh.draw()
 
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
             GL.glClear(int(GL.GL_COLOR_BUFFER_BIT) | int(GL.GL_DEPTH_BUFFER_BIT))
@@ -4088,17 +4092,17 @@ class PssgViewerFrame(wx.Frame):
             self.render_target = None
 
         def _init_pssg_model_resources(self):
-            for id, rendernode in self.pssg_tree.rendernodes.items():
+            for id, render_instance in self.pssg_tree.render_instances.items():
                 self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
                     PssgViewerFrame.SceneMesh.DEFAULT_SKINNED_LAYOUT,
                     (
                         ctypes.c_ubyte
-                        * len(rendernode.render_data_source.vertex_buffer)
-                    ).from_buffer(rendernode.render_data_source.vertex_buffer),
+                        * len(render_instance.vertex_buffer)
+                    ).from_buffer(render_instance.vertex_buffer),
                     (
-                        ctypes.c_ubyte * len(rendernode.render_data_source.index_buffer)
-                    ).from_buffer(rendernode.render_data_source.index_buffer),
-                    rendernode.render_data_source.num_indices,
+                        ctypes.c_ubyte * len(render_instance.index_buffer)
+                    ).from_buffer(render_instance.index_buffer),
+                    render_instance.num_indices,
                 )
                 self.pssg_meshes[id].start()
 
@@ -4113,7 +4117,7 @@ class PssgViewerFrame(wx.Frame):
                 self.pssg_textures[id].start()
 
             for id, skinnode in self.pssg_tree.skinnednodes.items():
-                self.pssg_skins[id] = PssgViewerFrame.ScenePose(num_matrices=100)
+                self.pssg_skins[id] = PssgViewerFrame.ScenePose(num_matrices=200)
                 self.pssg_skins[id].start()
 
             # make the model fit the viewport easily
