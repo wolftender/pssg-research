@@ -4258,24 +4258,21 @@ class PssgViewerFrame(wx.Frame):
         self.SetStatusBar(self.status_bar)
         self.SetSizer(sizer)
 
-        self.timer = wx.Timer(self)
-        self.timer.Start(10)
-
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(wx.EVT_MENU, self.on_close, file_menu_exit)
-        self.Bind(wx.EVT_TIMER, self.on_timer)
         self.Bind(wx.EVT_MENU, self.on_reset_camera, view_menu_reset_camera)
+        self.Bind(wx.EVT_IDLE, self.on_idle)
 
         for item_id in self.MENU_ORIENT_MATRICES.keys():
             self.Bind(wx.EVT_MENU, self.on_view_choice, id=item_id)
 
     def on_close(self, event: wx.Event):
-        self.timer.Stop()
         self.canvas.cleanup()
         self.Destroy()
 
-    def on_timer(self, event: wx.TimerEvent):
+    def on_idle(self, event: wx.IdleEvent):
         self.canvas.on_render()
+        event.RequestMore()
 
     def on_reset_camera(self, event: wx.MenuEvent):
         self.canvas.azimuth = 0
