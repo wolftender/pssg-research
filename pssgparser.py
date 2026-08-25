@@ -2375,7 +2375,9 @@ class PssgModelTree:
         indices_format = str(render_idx_source.get_attribute("format").value)
         indices_count = int(render_idx_source.get_attribute("count").value)
 
-        logging.debug("found index buffer of size %d", len(indices))
+        logging.debug(
+            "found index buffer of size %d and format %s", len(indices), indices_format
+        )
 
         # construct the vertex buffer out of streams
         render_streams = render_data_source.find_children("RENDERSTREAM")
@@ -3443,11 +3445,12 @@ class PssgViewerFrame(wx.Frame):
             layout: list[LayoutElement],
             vertices: Any,
             indices: Any,
+            num_indices: int,
         ):
             self.layout = layout
             self.vertices = vertices
             self.indices = indices
-            self.num_indices = len(self.indices)
+            self.num_indices = num_indices
 
             self.vertex_buffer = None
             self.index_buffer = None
@@ -3563,6 +3566,7 @@ class PssgViewerFrame(wx.Frame):
         model_matrix: Matrix4x4 = Matrix4x4.identity()
         world_matrix: Matrix4x4 = Matrix4x4.identity()
         view_matrix: Matrix4x4 = Matrix4x4.identity()
+        view_matrix_inv: Matrix4x4 = Matrix4x4.identity()
         proj_matrix: Matrix4x4 = Matrix4x4.identity()
 
         pssg_tree: PssgModelTree
@@ -3625,6 +3629,7 @@ class PssgViewerFrame(wx.Frame):
                 PssgViewerFrame.SceneMesh.POS_LAYOUT,
                 (ctypes.c_float * len(QUAD_VERTICES))(*QUAD_VERTICES),
                 (ctypes.c_uint32 * len(QUAD_INDICES))(*QUAD_INDICES),
+                len(QUAD_INDICES),
             )
 
             self.pssg_tree = PssgModelTree(element)
@@ -3652,6 +3657,23 @@ class PssgViewerFrame(wx.Frame):
 
                 self.elevation = self.elevation - delta_pitch
                 self.azimuth = self.azimuth - delta_yaw
+            elif event.Dragging() and event.MiddleIsDown():
+                if self.prev_mouse_position is None:
+                    self.prev_mouse_position = current_mouse_pos
+                    return
+
+                vp_size = self.GetClientSize()
+                delta_x = current_mouse_pos.x - self.prev_mouse_position.x
+                delta_y = current_mouse_pos.y - self.prev_mouse_position.y
+                delta_x = 2.0 * delta_x / vp_size.x
+                delta_y = 2.0 * delta_y / vp_size.y
+                self.prev_mouse_position = current_mouse_pos
+
+                self.center = self.center + (
+                    self.view_matrix_inv._mul_vector(
+                        Vector3(-delta_x, delta_y, 0.0), 0.0
+                    )
+                )
             else:
                 self.prev_mouse_position = None
 
@@ -3690,6 +3712,18 @@ class PssgViewerFrame(wx.Frame):
             self.view_matrix = (
                 Matrix4x4.translation(Vector3(0, 0, -self.distance)) * self.view_matrix
             )
+
+            self.view_matrix_inv = Matrix4x4.translation(Vector3(0, 0, self.distance))
+            self.view_matrix_inv = (
+                Matrix4x4.rotation_x(self.elevation) * self.view_matrix_inv
+            )
+            self.view_matrix_inv = (
+                Matrix4x4.rotation_y(self.azimuth) * self.view_matrix_inv
+            )
+            self.view_matrix_inv = (
+                Matrix4x4.translation(self.center) * self.view_matrix_inv
+            )
+
             self.proj_matrix = Matrix4x4.perspective(
                 vp_size.width / vp_size.height, math.pi * 0.5, 0.05, 100.0
             )
@@ -4064,6 +4098,7 @@ class PssgViewerFrame(wx.Frame):
                     (
                         ctypes.c_ubyte * len(rendernode.render_data_source.index_buffer)
                     ).from_buffer(rendernode.render_data_source.index_buffer),
+                    rendernode.render_data_source.num_indices,
                 )
                 self.pssg_meshes[id].start()
 
@@ -4221,7 +4256,6 @@ class PssgViewerFrame(wx.Frame):
                 wx.dataview.EVT_DATAVIEW_SELECTION_CHANGED, self._on_select_motion
             )
 
-            
             sizer.Add(self.splitter, 1, wx.EXPAND | wx.ALL)
             self.splitter.SplitVertically(self.motion_selector, self.canvas, 330)
         else:
@@ -4278,6 +4312,7 @@ class PssgViewerFrame(wx.Frame):
         self.canvas.azimuth = 0
         self.canvas.elevation = 0
         self.canvas.distance = 2
+        self.canvas.center = Vector3.zero()
 
     def on_view_choice(self, event: wx.MenuEvent):
         _, _, matrrix = self.MENU_ORIENT_MATRICES[event.GetId()]
