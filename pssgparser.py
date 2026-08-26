@@ -2029,6 +2029,7 @@ class PssgModelTree:
         id: str
         attribute: PssgModelTree.PssgVertexAttribute
         format: PssgArrayBufferType
+        element_count: int
         buffer: bytearray = field(default_factory=bytearray)
 
     @dataclass
@@ -2376,6 +2377,101 @@ class PssgModelTree:
 
                 render_instance.texture = self.textures[texture_id]
 
+    def _parse_pssg_vertex_stream(self, render_stream: PssgElement) -> Optional[PssgVertexStream]:
+        LAYOUT_PER_RENDER_TYPE = {
+            "Vertex": (self.PssgVertexAttribute.POSITION, PssgArrayBufferType.FLOAT3),
+            "ST": (self.PssgVertexAttribute.UV, PssgArrayBufferType.FLOAT2),
+            "Normal": (self.PssgVertexAttribute.NORMAL, PssgArrayBufferType.FLOAT3),
+            "SkinnableVertex": (
+                self.PssgVertexAttribute.POSITION,
+                PssgArrayBufferType.FLOAT3,
+            ),
+            "SkinnableNormal": (
+                self.PssgVertexAttribute.NORMAL,
+                PssgArrayBufferType.FLOAT3,
+            ),
+            "SkinWeights": (
+                self.PssgVertexAttribute.SKINWEIGHT,
+                PssgArrayBufferType.FLOAT4,
+            ),
+            "SkinIndices": (
+                self.PssgVertexAttribute.SKINJOINT,
+                PssgArrayBufferType.UINT4,
+            ),
+        }
+
+        data_block_name = render_stream.get_attribute("dataBlock").value.lstrip("#")
+        data_block_src = self._find_pssg_data_block(data_block_name)
+        if data_block_src is None:
+            raise Exception(f"data block {data_block_name} does not exist")
+
+        # data blocks are "typed", thats how we know what vertex attribute this data
+        # block is bound to
+        data_block_name = data_block_src.get_attribute("id").value
+        data_block_element_count = int(
+            data_block_src.get_attribute("elementCount").value
+        )
+
+        data_block_stream = data_block_src.find_child("DATABLOCKSTREAM")
+        if data_block_stream is None:
+            raise Exception(
+                f"data block {data_block_name} does not have any DATABLOCKSTREAM"
+            )
+
+        data_block_data = data_block_src.find_child("DATABLOCKDATA")
+        if data_block_data is None:
+            raise Exception(
+                f"data block {data_block_name} does not have any DATABLOCKDATA"
+            )
+
+        data_block_render_type = str(
+            data_block_stream.get_attribute("renderType").value
+        )  # Vertex, Normal, ST
+        data_block_data_type = str(
+            data_block_stream.get_attribute("dataType").value
+        )  # float3 etc
+        data_block_offset = int(
+            data_block_stream.get_attribute("offset").value
+        )  # in bytes
+        data_block_stride = int(
+            data_block_stream.get_attribute("stride").value
+        )  # in bytes
+
+        if data_block_render_type not in LAYOUT_PER_RENDER_TYPE:
+            logging.warning("unsupported render type %s", data_block_render_type)
+            return None
+
+        src_type = PSSG_KNOWN_ARRAY_TYPES[data_block_data_type]
+        src_offset = data_block_offset
+        src_stride = data_block_stride
+        dst_offset = 0
+        vertex_attrib, dst_type = LAYOUT_PER_RENDER_TYPE[data_block_render_type]
+
+        dst_scalar_type, dst_components = dst_type.value
+        dst_code, dst_byte_width = dst_scalar_type.value
+        dst_stride = dst_byte_width * dst_components
+
+        vertex_stream = self.PssgVertexStream(
+            id=data_block_name,
+            attribute=vertex_attrib,
+            format=dst_type,
+            element_count=data_block_element_count,
+            buffer=bytearray(data_block_element_count * dst_stride),
+        )
+        pssg_transmute_buffer(
+            src_data=data_block_data.value,
+            src_type=src_type,
+            src_stride=src_stride,
+            src_offset=src_offset,
+            dst_data=vertex_stream.buffer,
+            dst_type=dst_type,
+            dst_stride=dst_stride,
+            dst_offset=dst_offset,
+            count=data_block_element_count,
+        )
+
+        return vertex_stream
+
     def _parse_pssg_render_data_source(
         self, pssg_element: PssgElement
     ) -> PssgRenderInstance:
@@ -2415,109 +2511,22 @@ class PssgModelTree:
                 count=index_count,
             )
 
-        LAYOUT_PER_RENDER_TYPE = {
-            "Vertex": (self.PssgVertexAttribute.POSITION, PssgArrayBufferType.FLOAT3),
-            "ST": (self.PssgVertexAttribute.UV, PssgArrayBufferType.FLOAT2),
-            "Normal": (self.PssgVertexAttribute.NORMAL, PssgArrayBufferType.FLOAT3),
-            "SkinnableVertex": (
-                self.PssgVertexAttribute.POSITION,
-                PssgArrayBufferType.FLOAT3,
-            ),
-            "SkinnableNormal": (
-                self.PssgVertexAttribute.NORMAL,
-                PssgArrayBufferType.FLOAT3,
-            ),
-            "SkinWeights": (
-                self.PssgVertexAttribute.SKINWEIGHT,
-                PssgArrayBufferType.FLOAT4,
-            ),
-            "SkinIndices": (
-                self.PssgVertexAttribute.SKINJOINT,
-                PssgArrayBufferType.UINT4,
-            ),
-        }
-
         num_vertices = -1
         for render_stream in render_streams:
-            data_block_name = render_stream.get_attribute("dataBlock").value.lstrip("#")
-            data_block_src = self._find_pssg_data_block(data_block_name)
-            if data_block_src is None:
-                raise Exception(f"data block {data_block_name} does not exist")
-
-            # data blocks are "typed", thats how we know what vertex attribute this data
-            # block is bound to
-            data_block_name = data_block_src.get_attribute("id").value
-            data_block_element_count = int(
-                data_block_src.get_attribute("elementCount").value
-            )
-
-            if num_vertices == -1:
-                num_vertices = data_block_element_count
-
-            data_block_stream = data_block_src.find_child("DATABLOCKSTREAM")
-            if data_block_stream is None:
-                raise Exception(
-                    f"data block {data_block_name} does not have any DATABLOCKSTREAM"
-                )
-
-            data_block_data = data_block_src.find_child("DATABLOCKDATA")
-            if data_block_data is None:
-                raise Exception(
-                    f"data block {data_block_name} does not have any DATABLOCKDATA"
-                )
-
-            data_block_render_type = str(
-                data_block_stream.get_attribute("renderType").value
-            )  # Vertex, Normal, ST
-            data_block_data_type = str(
-                data_block_stream.get_attribute("dataType").value
-            )  # float3 etc
-            data_block_offset = int(
-                data_block_stream.get_attribute("offset").value
-            )  # in bytes
-            data_block_stride = int(
-                data_block_stream.get_attribute("stride").value
-            )  # in bytes
-
-            if data_block_render_type not in LAYOUT_PER_RENDER_TYPE:
-                logging.warning("unsupported render type %s", data_block_render_type)
+            vertex_stream = self._parse_pssg_vertex_stream(render_stream)
+            if vertex_stream is None:
                 continue
 
-            src_type = PSSG_KNOWN_ARRAY_TYPES[data_block_data_type]
-            src_offset = data_block_offset
-            src_stride = data_block_stride
-            dst_offset = 0
-            vertex_attrib, dst_type = LAYOUT_PER_RENDER_TYPE[data_block_render_type]
-
-            dst_scalar_type, dst_components = dst_type.value
-            dst_code, dst_byte_width = dst_scalar_type.value
-            dst_stride = dst_byte_width * dst_components
-
-            vertex_stream = self.PssgVertexStream(
-                id=data_block_name,
-                attribute=vertex_attrib,
-                format=dst_type,
-                buffer=bytearray(data_block_element_count * dst_stride),
-            )
-            pssg_transmute_buffer(
-                src_data=data_block_data.value,
-                src_type=src_type,
-                src_stride=src_stride,
-                src_offset=src_offset,
-                dst_data=vertex_stream.buffer,
-                dst_type=dst_type,
-                dst_stride=dst_stride,
-                dst_offset=dst_offset,
-                count=data_block_element_count,
-            )
-
             result.vertex_streams.append(vertex_stream)
+            if num_vertices == -1:
+                num_vertices = vertex_stream.element_count
 
         COLOR_STRIDE = FLOAT_SIZE * 3
         color_stream = self.PssgVertexStream(
                 id=f"{render_data_source_id}_COLOR",
                 attribute= self.PssgVertexAttribute.COLOR,
                 format=PssgArrayBufferType.FLOAT3,
+                element_count=num_vertices,
                 buffer=bytearray(COLOR_STRIDE * num_vertices),
             )
         for i in range(num_vertices):
@@ -2525,7 +2534,7 @@ class PssgModelTree:
 
         result.vertex_streams.append(color_stream)
         result.num_vertices = num_vertices
-        
+
         self.render_instances[render_data_source_id] = result
         return result
 
@@ -2597,6 +2606,36 @@ class PssgModelTree:
         self.rendernodes[result.id] = result
         return result
 
+    def _parse_pssg_skin_network_node(self, network_instance: PssgElement) -> PssgRenderInstance:
+        network_instance_id = str(network_instance.get_attribute("id").value)
+        render_instance_source = network_instance.find_child("RENDERINSTANCESOURCE")
+        if render_instance_source is None:
+            raise Exception(f"skin network {network_instance_id} is missing RENDERINSTANCESOURCE")
+
+        shader_instance_id: str = network_instance.get_attribute("shader").value
+        render_data_src_id: str = render_instance_source.get_attribute(
+            "source"
+        ).value
+
+        render_data_source = self._find_pssg_render_data_source(
+            render_data_src_id.lstrip("#")
+        )
+        if render_data_source is None:
+            raise Exception(
+                f"render data source {render_data_src_id} does not exist"
+            )
+
+        shader_instance = self._find_pssg_shader_instance(
+            shader_instance_id.lstrip("#")
+        )
+        if shader_instance is None:
+            raise Exception(f"shader instance {shader_instance_id} does not exist")
+
+        render_instance = self._parse_pssg_render_data_source(render_data_source)
+        self._parse_pssg_shader_instance(render_instance, shader_instance)
+
+        return render_instance
+
     def _parse_pssg_skin_node(self, node: PssgElement) -> PssgModelNode:
         node_id = node.get_attribute("id").value
         result = self.PssgModelSkinnedNode(id=node_id)
@@ -2620,54 +2659,30 @@ class PssgModelTree:
             raise Exception(f"skin node {node_id} is missing MODIFIERNETWORKINSTANCE")
 
         for network_instance in network_instances:
-            render_instance_source = network_instance.find_child("RENDERINSTANCESOURCE")
-            if render_instance_source is None:
-                raise Exception(f"skin node {node_id} is missing RENDERINSTANCESOURCE")
+            result.render_data_sources.append(self._parse_pssg_skin_network_node(network_instance))
+            
+        # parse skeleton
+        skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
+        skeleton = self._find_pssg_skeleton(skeleton_id)
+        if skeleton is None:
+            raise Exception(f"missing skeleton with id {skeleton_id}")
 
-            shader_instance_id: str = network_instance.get_attribute("shader").value
-            render_data_src_id: str = render_instance_source.get_attribute(
-                "source"
-            ).value
+        skinjoints = node.find_children("SKINJOINT")
+        inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
 
-            render_data_source = self._find_pssg_render_data_source(
-                render_data_src_id.lstrip("#")
+        if len(skinjoints) > len(inverse_binds):
+            raise Exception(
+                f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices"
             )
-            if render_data_source is None:
-                raise Exception(
-                    f"render data source {render_data_src_id} does not exist"
-                )
 
-            shader_instance = self._find_pssg_shader_instance(
-                shader_instance_id.lstrip("#")
+        for i in range(len(skinjoints)):
+            inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
+            skin_joint_id = str(
+                skinjoints[i].get_attribute("joint").value.lstrip("#")
             )
-            if shader_instance is None:
-                raise Exception(f"shader instance {shader_instance_id} does not exist")
-
-            render_instance = self._parse_pssg_render_data_source(render_data_source)
-            self._parse_pssg_shader_instance(render_instance, shader_instance)
-            result.render_data_sources.append(render_instance)
-
-            skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
-            skeleton = self._find_pssg_skeleton(skeleton_id)
-            if skeleton is None:
-                raise Exception(f"missing skeleton with id {skeleton_id}")
-
-            skinjoints = node.find_children("SKINJOINT")
-            inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
-
-            if len(skinjoints) > len(inverse_binds):
-                raise Exception(
-                    f"invalid skeleton bind, have {len(skinjoints)} and {len(inverse_binds)} matrices"
-                )
-
-            for i in range(len(skinjoints)):
-                inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
-                skin_joint_id = str(
-                    skinjoints[i].get_attribute("joint").value.lstrip("#")
-                )
-                result.skin_joints.append(
-                    PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
-                )
+            result.skin_joints.append(
+                PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
+            )
 
         self.rendernodes[result.id] = result
         self.skinnednodes[result.id] = result
