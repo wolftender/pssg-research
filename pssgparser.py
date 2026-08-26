@@ -2636,39 +2636,40 @@ class PssgModelTree:
 
         return render_instance
 
+    def _parse_pssg_morph_network_node(self, network_instance: PssgElement) -> PssgRenderInstance:
+        raise NotImplementedError()
+
     def _parse_pssg_skin_node(self, node: PssgElement) -> PssgModelNode:
         node_id = node.get_attribute("id").value
         result = self.PssgModelSkinnedNode(id=node_id)
 
-        for child in node.children:
-            if self._parse_pssg_node_base(node, child, result):
-                continue
-
-            match child.name:
-                case "MODIFIERNETWORKINSTANCE" | "SKINJOINT":
-                    continue
-
-                case _:
-                    logging.warning("unhandled node type %s", child.name)
-
-        # skinned draw nodes are some kind of modifier around regular buffers
-        # we really don't care about parsing them properly, whats important
-        # is the data they hold
-        network_instances = node.find_children("MODIFIERNETWORKINSTANCE")
-        if len(network_instances) == 0:
-            raise Exception(f"skin node {node_id} is missing MODIFIERNETWORKINSTANCE")
-
-        for network_instance in network_instances:
-            result.render_data_sources.append(self._parse_pssg_skin_network_node(network_instance))
-            
         # parse skeleton
         skeleton_id = node.get_attribute("skeleton").value.lstrip("#")
         skeleton = self._find_pssg_skeleton(skeleton_id)
         if skeleton is None:
             raise Exception(f"missing skeleton with id {skeleton_id}")
 
-        skinjoints = node.find_children("SKINJOINT")
         inverse_binds = skeleton.find_children("INVERSEBINDMATRIX")
+        skinjoints = []
+
+        for child in node.children:
+            if self._parse_pssg_node_base(node, child, result):
+                continue
+
+            match child.name:
+                case "MODIFIERNETWORKINSTANCE":
+                    network_type = str(child.get_attribute("network").value)
+                    
+                    if network_type == "PSSGInternalDatabase#skinTransformLocal":
+                        result.render_data_sources.append(self._parse_pssg_skin_network_node(child))
+                    else:
+                        logging.error("unknown network %s", network_type)
+
+                case "SKINJOINT":
+                    skinjoints.append(child)
+
+                case _:
+                    logging.warning("unhandled node type %s", child.name)
 
         if len(skinjoints) > len(inverse_binds):
             raise Exception(
