@@ -236,6 +236,8 @@ BASE_ELEMENT_TYPES: list[PssgBaseElement] = [
     PssgBaseElement("MODIFIERNETWORKINSTANCEUNIQUEINPUT", PssgElementType.NONE),
     PssgBaseElement("MODIFIERNETWORKINSTANCEDYNAMICSTREAMTYPE", PssgElementType.NONE),
     PssgBaseElement("USERDATA", PssgElementType.NONE),
+    PssgBaseElement("WEIGHTS", PssgElementType.BYTE),
+    PssgBaseElement("MORPHMODIFIERWEIGHTS", PssgElementType.NONE),
 ]
 
 
@@ -581,6 +583,7 @@ BASE_ATTRIBUTE_TYPES: list[PssgBaseAttribute] = [
     PssgBaseAttribute("USERDATA", "object", PssgAttributeType.STRING),
     PssgBaseAttribute("TYPEINFO", "typeName", PssgAttributeType.STRING),
     PssgBaseAttribute("TYPEINFO", "typeCount", PssgAttributeType.INT),
+    PssgBaseAttribute("MORPHMODIFIERWEIGHTS", "weightCount", PssgAttributeType.INT),
 ]
 
 
@@ -2050,6 +2053,8 @@ class PssgModelTree:
         num_vertices: int = 0
         num_indices: int = 0
         texture: Optional[PssgDecodedTexture] = None
+        morph_targets: list[PssgModelTree.PssgMorphTarget] = field(default_factory=list)
+        morph_weights: list[float] = field(default_factory=list)
 
     @dataclass
     class PssgModelNode:
@@ -2104,6 +2109,7 @@ class PssgModelTree:
     skinnednodes: dict[str, PssgModelSkinnedNode] = {}
     jointnodes: dict[str, PssgModelNode] = {}
     render_instances: dict[str, PssgRenderInstance] = {}
+    morph_instances: dict[str, PssgRenderInstance] = {}
 
     pssg_cache_render_data_source: dict[str, PssgElement] = {}
     pssg_cache_shader_instance: dict[str, PssgElement] = {}
@@ -2111,6 +2117,8 @@ class PssgModelTree:
     ppsg_cache_texture: dict[str, PssgElement] = {}
     pssg_cache_shader_group: dict[str, PssgElement] = {}
     pssg_cache_skeleton: dict[str, PssgElement] = {}
+    pssg_cache_modifiernet: dict[str, PssgElement] = {}
+    pssg_cache_morphweights: dict[str, PssgElement] = {}
 
     def __init__(self, element: PssgElement):
         if element.name != "PSSGDATABASE":
@@ -2136,12 +2144,12 @@ class PssgModelTree:
         different kinds of nodes
         """
 
-        self.pssg_buffer_library = self._find_library("RENDERINTERFACEBOUND")
-        self.pssg_source_library = self._find_library("RENDERDATASOURCE")
-        self.pssg_node_library = self._find_library("NODE")
-        self.pssg_material_library = self._find_library("SHADERINSTANCE")
-        self.pssg_skeleton_library = self._find_library("SKELETON")
-        self.pssg_shader_library = self._find_library("SHADERGROUP")
+        self.pssg_buffer_library = self._get_library("RENDERINTERFACEBOUND")
+        self.pssg_source_library = self._get_library("RENDERDATASOURCE")
+        self.pssg_node_library = self._get_library("NODE")
+        self.pssg_material_library = self._get_library("SHADERINSTANCE")
+        self.pssg_skeleton_library = self._get_library("SKELETON")
+        self.pssg_shader_library = self._get_library("SHADERGROUP")
 
         pssg_root = self.pssg_node_library.find_child("ROOTNODE")
         if pssg_root is None:
@@ -2293,6 +2301,20 @@ class PssgModelTree:
                 skeleton_id = str(child.get_attribute("id").value)
                 self.pssg_cache_skeleton[skeleton_id] = child
 
+        modifier_library = self._find_library("MODIFIERNETWORK")
+        if modifier_library is not None:
+            for child in modifier_library.children:
+                if child.name == "MODIFIERNETWORK":
+                    modifiernet_id = str(child.get_attribute("id").value)
+                    self.pssg_cache_modifiernet[modifiernet_id] = child
+
+        morph_weight_library = self._find_library("MORPHMODIFIERWEIGHTS")
+        if morph_weight_library is not None:
+            for child in morph_weight_library.children:
+                if child.name == "MORPHMODIFIERWEIGHTS":
+                    morph_weights_id = str(child.get_attribute("id").value)
+                    self.pssg_cache_morphweights[morph_weights_id] = child
+
     def _find_pssg_render_data_source(self, id: str) -> Optional[PssgElement]:
         if id in self.pssg_cache_render_data_source:
             return self.pssg_cache_render_data_source[id]
@@ -2326,6 +2348,18 @@ class PssgModelTree:
     def _find_pssg_skeleton(self, id: str) -> Optional[PssgElement]:
         if id in self.pssg_cache_skeleton:
             return self.pssg_cache_skeleton[id]
+
+        return None
+
+    def _find_pssg_mod_network(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_modifiernet:
+            return self.pssg_cache_modifiernet[id]
+
+        return None
+
+    def _find_pssg_morph_weights(self, id: str) -> Optional[PssgElement]:
+        if id in self.pssg_cache_morphweights:
+            return self.pssg_cache_morphweights[id]
 
         return None
 
@@ -2600,6 +2634,14 @@ class PssgModelTree:
             if not self._parse_pssg_node_base(node, child, result):
                 if child.name == "RENDERSTREAMINSTANCE":
                     self._parse_pssg_render_stream_instance(result, child)
+                elif child.name == "MODIFIERNETWORKINSTANCE":
+                    network_type = str(child.get_attribute("network").value).lstrip("#")
+                    network = self._find_pssg_mod_network(network_type)
+                    if network is None:
+                        logging.error("unknown modifier network %s", network_type)
+                        continue
+
+                    result.render_data_sources.append(self._parse_pssg_morph_network_node(network, child))
                 else:
                     logging.warning("unhandled node type %s", child.name)
 
@@ -2636,8 +2678,146 @@ class PssgModelTree:
 
         return render_instance
 
-    def _parse_pssg_morph_network_node(self, network_instance: PssgElement) -> PssgRenderInstance:
-        raise NotImplementedError()
+    def _parse_pssg_morph_network_node(self, network: PssgElement, network_instance: PssgElement) -> PssgRenderInstance:
+        network_input_streams = []
+
+        render_instance_sources = network_instance.find_children("RENDERINSTANCESOURCE")
+        modifier_inputs = network_instance.find_children("MODIFIERNETWORKINSTANCEMODIFIERINPUT")
+        network_instance_id = str(network_instance.get_attribute("id").value)
+
+        result = self.PssgRenderInstance(id=network_instance_id)
+
+        # userdata object
+        userdata = network_instance.find_child("USERDATA")
+        if userdata is None:
+            raise Exception(f"no user data object on network {network_instance_id}")
+
+        morph_weights_id = str(userdata.get_attribute("object").value).lstrip("#")
+        morph_weights_element = self._find_pssg_morph_weights(morph_weights_id)
+
+        if morph_weights_element is None:
+            raise Exception(f"invalid morph weights {morph_weights_id} reference")
+
+        morph_weight_count = int(morph_weights_element.get_attribute("weightCount").value)
+        weights_object = morph_weights_element.find_child("WEIGHTS")
+        if weights_object is None:
+            raise Exception(f"invalid morph weights {morph_weights_id} reference - no weights inside")
+
+        result.morph_weights = weights_object.value
+
+        # shader parsing
+        shader_instance_id: str = network_instance.get_attribute("shader").value
+        shader_instance = self._find_pssg_shader_instance( shader_instance_id.lstrip("#"))
+        if shader_instance is None:
+            raise Exception(
+                f"shader instance {shader_instance_id} does not exist"
+            )
+
+        self._parse_pssg_shader_instance(result, shader_instance)
+
+        # resolving network streams
+        for modifier_input in modifier_inputs:
+            modifier_input_source = int(modifier_input.get_attribute("source").value)
+            modifier_input_stream = int(modifier_input.get_attribute("stream").value)
+
+            render_data_source_id = str(render_instance_sources[modifier_input_source].get_attribute("source").value).lstrip("#")
+            render_data_source = self._find_pssg_render_data_source(render_data_source_id)
+
+            if render_data_source is None:
+                raise Exception(f"render data source {render_data_source_id} does not exist")
+            
+            source_stream_list = render_data_source.find_children("RENDERSTREAM")
+            network_input_streams.append(source_stream_list[modifier_input_stream])
+
+        # parsing network inputs
+        morph_channel_count = None
+        num_vertices = None
+        
+        network_entries = network.find_children("MODIFIERNETWORKENTRY")
+
+        def _extract_n_morphs(network_entry: PssgElement, network_entry_name: str, n: int):
+            nonlocal num_vertices
+            nonlocal morph_channel_count
+
+            vertex_streams = []
+            
+            connections = network_entry.find_children("MODIFIERNETWORKCONNECTION")
+            for connection in connections:
+                connection_modifier = int(connection.get_attribute("modifier").value)
+                connection_stream = int(connection.get_attribute("stream").value)
+
+                if connection_modifier != -1:
+                    raise Exception(f"network {network_instance_id}, entry {network_entry_name}: modifier {connection_modifier} is not supported by the simplified parser")
+                
+                vertex_stream = self._parse_pssg_vertex_stream(network_input_streams[connection_stream])
+                if vertex_stream is None:
+                    raise Exception(f"error in network {network_instance_id}, entry {network_entry_name} has invalid stream {connection_stream}")
+                
+                if num_vertices is None:
+                    num_vertices = vertex_stream.element_count
+
+                vertex_streams.append(vertex_stream)
+
+            if morph_channel_count is None:
+                morph_channel_count = n
+            elif morph_channel_count != n:
+                raise Exception("morph count mismatch between input channels")
+            
+            morph_channel_count = n
+            result.vertex_streams.append(vertex_streams[0])
+            for i in range(1, n):
+                result.morph_targets.append(self.PssgMorphTarget(id=f"{network_instance_id}_{i}",vertex_streams=vertex_streams[i]))
+
+        for network_entry in network_entries:
+            network_entry_name = str(network_entry.get_attribute("name").value)
+            match network_entry_name:
+                case "Morph23":
+                    _extract_n_morphs(network_entry, network_entry_name, 2)
+
+                case "Morph33":
+                    _extract_n_morphs(network_entry, network_entry_name, 3)
+                    
+                case "SkinLocal":
+                    connections = network_entry.find_children("MODIFIERNETWORKCONNECTION")
+                    for connection in connections:
+                        connection_modifier = int(connection.get_attribute("modifier").value)
+                        connection_stream = int(connection.get_attribute("stream").value)
+
+                        if connection_modifier != -1:
+                            continue
+
+                        vertex_stream = self._parse_pssg_vertex_stream(network_input_streams[connection_stream])
+                        if vertex_stream is not None:
+                            result.vertex_streams.append(vertex_stream)
+
+                            if num_vertices is None:
+                                num_vertices = vertex_stream.element_count
+                        else:
+                            raise Exception(f"error in network {network_instance_id}, entry {network_entry_name} has invalid stream")
+                case _:
+                    logging.error("bad network %s", network_entry_name)
+
+        if num_vertices is None:
+            raise Exception(f"network {network_instance_id} provides no vertex streams")
+
+        # append color artificially
+        COLOR_STRIDE = 12
+        color_stream = self.PssgVertexStream(
+                id=f"{network_instance_id}_COLOR",
+                attribute= self.PssgVertexAttribute.COLOR,
+                format=PssgArrayBufferType.FLOAT3,
+                element_count=num_vertices,
+                buffer=bytearray(COLOR_STRIDE * num_vertices),
+            )
+        for i in range(num_vertices):
+            struct.pack_into("<3f", color_stream.buffer, i * COLOR_STRIDE, 1.0, 1.0, 1.0)
+
+        result.vertex_streams.append(color_stream)
+
+        result.num_vertices = num_vertices
+        self.render_instances[result.id] = result
+        self.morph_instances[morph_weights_id] = result # link by the weights id is required by animations later on
+        return result
 
     def _parse_pssg_skin_node(self, node: PssgElement) -> PssgModelNode:
         node_id = node.get_attribute("id").value
@@ -2658,12 +2838,17 @@ class PssgModelTree:
 
             match child.name:
                 case "MODIFIERNETWORKINSTANCE":
-                    network_type = str(child.get_attribute("network").value)
+                    network_type = str(child.get_attribute("network").value).lstrip("#")
                     
                     if network_type == "PSSGInternalDatabase#skinTransformLocal":
                         result.render_data_sources.append(self._parse_pssg_skin_network_node(child))
                     else:
-                        logging.error("unknown network %s", network_type)
+                        network = self._find_pssg_mod_network(network_type)
+                        if network is None:
+                            logging.error("unknown modifier network %s", network_type)
+                            continue
+
+                        result.render_data_sources.append(self._parse_pssg_morph_network_node(network, child))
 
                 case "SKINJOINT":
                     skinjoints.append(child)
@@ -2689,7 +2874,14 @@ class PssgModelTree:
         self.skinnednodes[result.id] = result
         return result
 
-    def _find_library(self, type: str) -> PssgElement:
+    def _get_library(self, type: str) -> PssgElement:
+            library = self._find_library(type)
+            if library is not None:
+                return library
+    
+            raise Exception(f"cannot find a pssg library of type {type}")
+    
+    def _find_library(self, type: str) -> Optional[PssgElement]:
         if len(self.pssg_libraries) == 0:
             self.pssg_libraries = self.pssg_model.find_children("LIBRARY")
 
@@ -2701,7 +2893,7 @@ class PssgModelTree:
             if library_type.value == type:
                 return library
 
-        raise Exception(f"cannot find a pssg library of type {type}")
+        return None
 
     def export_as_obj(self, output_file: str):
         raise NotImplementedError()
@@ -2756,10 +2948,10 @@ class PssgMotionTree:
             raise Exception(f"expected pssg PSSGDATABASE element, got {element.type}")
 
         self.pssg_file = element
-        self.pssg_animation_library = self._find_library("ANIMATION")
-        self.pssg_channel_library = self._find_library("ANIMATIONCHANNEL")
-        self.pssg_datablock_library = self._find_library("ANIMATIONCHANNELDATABLOCK")
-        self.pssg_animset_library = self._find_library("ANIMATIONHIERARCHYNODE")
+        self.pssg_animation_library = self._get_library("ANIMATION")
+        self.pssg_channel_library = self._get_library("ANIMATIONCHANNEL")
+        self.pssg_datablock_library = self._get_library("ANIMATIONCHANNELDATABLOCK")
+        self.pssg_animset_library = self._get_library("ANIMATIONHIERARCHYNODE")
 
         self._init_pssg_cache()
 
@@ -2982,7 +3174,14 @@ class PssgMotionTree:
         animation_set_id = str(element.get_attribute("id").value)
         animation_refs = element.find_children("ANIMATIONREF")
 
-    def _find_library(self, type: str) -> PssgElement:
+    def _get_library(self, type: str) -> PssgElement:
+        library = self._find_library(type)
+        if library is not None:
+            return library
+
+        raise Exception(f"cannot find a pssg library of type {type}")
+
+    def _find_library(self, type: str) -> Optional[PssgElement]:
         if len(self.pssg_libraries) == 0:
             self.pssg_libraries = self.pssg_file.find_children("LIBRARY")
 
@@ -2994,7 +3193,7 @@ class PssgMotionTree:
             if library_type.value == type:
                 return library
 
-        raise Exception(f"cannot find a pssg library of type {type}")
+        return None
 
 
 SCREEN_VERTEX_SHADER = """#version 400
