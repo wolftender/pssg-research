@@ -2016,11 +2016,36 @@ def pssg_transmute_buffer(
 
 
 class PssgModelTree:
+    class PssgVertexAttribute(Enum):
+        POSITION = 0
+        UV = 1
+        COLOR = 2
+        NORMAL = 3
+        SKINWEIGHT = 4
+        SKINJOINT = 5
+
+    @dataclass
+    class PssgVertexStream:
+        id: str
+        attribute: PssgModelTree.PssgVertexAttribute
+        format: PssgArrayBufferType
+        buffer: bytearray = field(default_factory=bytearray)
+
+    @dataclass
+    class PssgMorphTarget:
+        id: str
+        vertex_streams: list[PssgModelTree.PssgVertexStream] = field(
+            default_factory=list
+        )
+        num_vertices: int = 0
+
     @dataclass
     class PssgRenderInstance:
         id: str
-        vertex_buffer: bytearray = field(default_factory=bytearray)
-        index_buffer: bytearray = field(default_factory=bytearray)
+        vertex_streams: list[PssgModelTree.PssgVertexStream] = field(
+            default_factory=list
+        )
+        index_buffer: Optional[bytearray] = None
         num_vertices: int = 0
         num_indices: int = 0
         texture: Optional[PssgDecodedTexture] = None
@@ -2049,12 +2074,6 @@ class PssgModelTree:
     @dataclass
     class PssgModelRenderNode(PssgModelNode):
         render_data_sources: list[PssgModelTree.PssgRenderInstance] = field(
-            default_factory=list
-        )
-
-    @dataclass
-    class PssgModelMorphNode(PssgModelRenderNode):
-        morph_targets: list[PssgModelTree.PssgRenderInstance] = field(
             default_factory=list
         )
 
@@ -2358,55 +2377,67 @@ class PssgModelTree:
                 render_instance.texture = self.textures[texture_id]
 
     def _parse_pssg_render_data_source(
-        self, render_data_source: PssgElement
+        self, pssg_element: PssgElement
     ) -> PssgRenderInstance:
-        render_data_source_id = render_data_source.get_attribute("id").value
-        render_idx_source = render_data_source.find_child("RENDERINDEXSOURCE")
-        if render_idx_source is None:
-            raise Exception(
-                f"render data source {render_data_source_id} does not provide indices"
-            )
+        render_data_source_id = pssg_element.get_attribute("id").value
+        result = self.PssgRenderInstance(id=render_data_source_id)
 
-        render_indices = render_idx_source.find_child("INDEXSOURCEDATA")
-        if render_indices is None:
-            raise Exception(
-                f"invalid format for render index source in {render_data_source_id}"
-            )
-
-        indices = render_indices.value
-        indices_format = str(render_idx_source.get_attribute("format").value)
-        indices_count = int(render_idx_source.get_attribute("count").value)
-
-        logging.debug(
-            "found index buffer of size %d and format %s", len(indices), indices_format
-        )
-
-        # construct the vertex buffer out of streams
-        render_streams = render_data_source.find_children("RENDERSTREAM")
+        render_idx_source = pssg_element.find_child("RENDERINDEXSOURCE")
+        render_streams = pssg_element.find_children("RENDERSTREAM")
 
         FLOAT_SIZE = ctypes.sizeof(ctypes.c_float)
         UINT_SIZE = ctypes.sizeof(ctypes.c_uint32)
-        VERTEX_STRIDE = FLOAT_SIZE * 15 + UINT_SIZE * 4
-        POS_OFFSET = FLOAT_SIZE * 0
-        UV_OFFSET = FLOAT_SIZE * 3
-        COLOR_OFFSET = FLOAT_SIZE * 5
-        NORMAL_OFFSET = FLOAT_SIZE * 8
-        SKINWEIGHT_OFFSET = FLOAT_SIZE * 11
-        SKINJOINT_OFFSET = FLOAT_SIZE * 15
+
+        # if this is an indexed mesh, then parse indices
+        if render_idx_source is not None:
+            render_indices = render_idx_source.find_child("INDEXSOURCEDATA")
+            if render_indices is None:
+                raise Exception(
+                    f"invalid format for render index source in {render_data_source_id}"
+                )
+
+            indices = render_indices.value
+            index_format = str(render_idx_source.get_attribute("format").value)
+            index_count = int(render_idx_source.get_attribute("count").value)
+
+            result.index_buffer = bytearray(UINT_SIZE * index_count)
+            result.num_indices = index_count
+
+            pssg_transmute_buffer(
+                src_data=indices,
+                src_type=PSSG_KNOWN_ARRAY_TYPES[index_format],
+                src_stride=0,
+                src_offset=0,
+                dst_data=result.index_buffer,
+                dst_type=PssgArrayBufferType.UINT,
+                dst_stride=UINT_SIZE,
+                dst_offset=0,
+                count=index_count,
+            )
 
         LAYOUT_PER_RENDER_TYPE = {
-            "Vertex": (POS_OFFSET, PssgArrayBufferType.FLOAT3),
-            "ST": (UV_OFFSET, PssgArrayBufferType.FLOAT2),
-            "Normal": (NORMAL_OFFSET, PssgArrayBufferType.FLOAT3),
-            "SkinnableVertex": (POS_OFFSET, PssgArrayBufferType.FLOAT3),
-            "SkinnableNormal": (NORMAL_OFFSET, PssgArrayBufferType.FLOAT3),
-            "SkinWeights": (SKINWEIGHT_OFFSET, PssgArrayBufferType.FLOAT4),
-            "SkinIndices": (SKINJOINT_OFFSET, PssgArrayBufferType.UINT4),
+            "Vertex": (self.PssgVertexAttribute.POSITION, PssgArrayBufferType.FLOAT3),
+            "ST": (self.PssgVertexAttribute.UV, PssgArrayBufferType.FLOAT2),
+            "Normal": (self.PssgVertexAttribute.NORMAL, PssgArrayBufferType.FLOAT3),
+            "SkinnableVertex": (
+                self.PssgVertexAttribute.POSITION,
+                PssgArrayBufferType.FLOAT3,
+            ),
+            "SkinnableNormal": (
+                self.PssgVertexAttribute.NORMAL,
+                PssgArrayBufferType.FLOAT3,
+            ),
+            "SkinWeights": (
+                self.PssgVertexAttribute.SKINWEIGHT,
+                PssgArrayBufferType.FLOAT4,
+            ),
+            "SkinIndices": (
+                self.PssgVertexAttribute.SKINJOINT,
+                PssgArrayBufferType.UINT4,
+            ),
         }
 
-        vertex_buffer = bytearray()
         num_vertices = -1
-
         for render_stream in render_streams:
             data_block_name = render_stream.get_attribute("dataBlock").value.lstrip("#")
             data_block_src = self._find_pssg_data_block(data_block_name)
@@ -2421,7 +2452,6 @@ class PssgModelTree:
             )
 
             if num_vertices == -1:
-                vertex_buffer = bytearray(data_block_element_count * VERTEX_STRIDE)
                 num_vertices = data_block_element_count
 
             data_block_stream = data_block_src.find_child("DATABLOCKSTREAM")
@@ -2456,45 +2486,46 @@ class PssgModelTree:
             src_type = PSSG_KNOWN_ARRAY_TYPES[data_block_data_type]
             src_offset = data_block_offset
             src_stride = data_block_stride
-            dst_offset, dst_type = LAYOUT_PER_RENDER_TYPE[data_block_render_type]
+            dst_offset = 0
+            vertex_attrib, dst_type = LAYOUT_PER_RENDER_TYPE[data_block_render_type]
 
+            dst_scalar_type, dst_components = dst_type.value
+            dst_code, dst_byte_width = dst_scalar_type.value
+            dst_stride = dst_byte_width * dst_components
+
+            vertex_stream = self.PssgVertexStream(
+                id=data_block_name,
+                attribute=vertex_attrib,
+                format=dst_type,
+                buffer=bytearray(data_block_element_count * dst_stride),
+            )
             pssg_transmute_buffer(
                 src_data=data_block_data.value,
                 src_type=src_type,
                 src_stride=src_stride,
                 src_offset=src_offset,
-                dst_data=vertex_buffer,
+                dst_data=vertex_stream.buffer,
                 dst_type=dst_type,
-                dst_stride=VERTEX_STRIDE,
+                dst_stride=dst_stride,
                 dst_offset=dst_offset,
                 count=data_block_element_count,
             )
 
-        # fill with color white
-        for i in range(num_vertices):
-            struct.pack_into(
-                "<3f", vertex_buffer, i * VERTEX_STRIDE + COLOR_OFFSET, 1.0, 1.0, 1.0
+            result.vertex_streams.append(vertex_stream)
+
+        COLOR_STRIDE = FLOAT_SIZE * 3
+        color_stream = self.PssgVertexStream(
+                id=f"{render_data_source_id}_COLOR",
+                attribute= self.PssgVertexAttribute.COLOR,
+                format=PssgArrayBufferType.FLOAT3,
+                buffer=bytearray(COLOR_STRIDE * num_vertices),
             )
+        for i in range(num_vertices):
+            struct.pack_into("<3f", color_stream.buffer, i * COLOR_STRIDE, 1.0, 1.0, 1.0)
 
-        result = self.PssgRenderInstance(id=render_data_source_id)
-
-        result.vertex_buffer = vertex_buffer
+        result.vertex_streams.append(color_stream)
         result.num_vertices = num_vertices
-        result.index_buffer = bytearray(UINT_SIZE * indices_count)
-        result.num_indices = indices_count
-
-        pssg_transmute_buffer(
-            src_data=indices,
-            src_type=PSSG_KNOWN_ARRAY_TYPES[indices_format],
-            src_stride=0,
-            src_offset=0,
-            dst_data=result.index_buffer,
-            dst_type=PssgArrayBufferType.UINT,
-            dst_stride=4,
-            dst_offset=0,
-            count=indices_count,
-        )
-
+        
         self.render_instances[render_data_source_id] = result
         return result
 
@@ -3425,9 +3456,12 @@ class PssgViewerFrame(wx.Frame):
         FLOAT_SIZE = ctypes.sizeof(ctypes.c_float)
         UINT_SIZE = ctypes.sizeof(ctypes.c_uint32)
 
-        POS_LAYOUT = [
-            LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 3, FLOAT_SIZE * 0),
-        ]
+        POS_LAYOUT = [LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 3, 0)]
+        UV_LAYOUT = [LayoutElement(1, 2, GL.GL_FLOAT, FLOAT_SIZE * 2, 0)]
+        COLOR_LAYOUT = [LayoutElement(2, 3, GL.GL_FLOAT, FLOAT_SIZE * 3, 0)]
+        NORMAL_LAYOUT = [LayoutElement(3, 3, GL.GL_FLOAT, FLOAT_SIZE * 3, 0)]
+        SKINWEIGHT_LAYOUT = [LayoutElement(4, 4, GL.GL_FLOAT, FLOAT_SIZE * 4, 0)]
+        SKINJOINT_LAYOUT = [LayoutElement(5, 4, GL.GL_UNSIGNED_INT, UINT_SIZE * 4, 0)]
 
         POS_UV_COLOR_NORMAL_LAYOUT = [
             LayoutElement(0, 3, GL.GL_FLOAT, FLOAT_SIZE * 11, FLOAT_SIZE * 0),
@@ -3448,19 +3482,28 @@ class PssgViewerFrame(wx.Frame):
             ),
         ]
 
+        @dataclass
+        class VertexStream:
+            buffer: ctypes.Array
+            layout: list[PssgViewerFrame.SceneMesh.LayoutElement]
+
+        @dataclass
+        class IndexStream:
+            buffer: ctypes.Array
+            num_indices: int
+            gl_type: GL.Constant
+
         def __init__(
             self,
-            layout: list[LayoutElement],
-            vertices: Any,
-            indices: Any,
-            num_indices: int,
+            num_vertices: int,
+            vertex_streams: list[VertexStream],
+            index_stream: Optional[IndexStream],
         ):
-            self.layout = layout
-            self.vertices = vertices
-            self.indices = indices
-            self.num_indices = num_indices
+            self.num_vertices = num_vertices
+            self.vertex_streams = vertex_streams
+            self.index_stream = index_stream
 
-            self.vertex_buffer = None
+            self.vertex_buffers = []
             self.index_buffer = None
             self.handle = None
 
@@ -3471,56 +3514,70 @@ class PssgViewerFrame(wx.Frame):
             self.handle = GL.glGenVertexArrays(1)
             GL.glBindVertexArray(self.handle)
 
-            self.vertex_buffer = GL.glGenBuffers(1)
-            self.index_buffer = GL.glGenBuffers(1)
+            for vertex_stream in self.vertex_streams:
+                gl_buffer = GL.glGenBuffers(1)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, gl_buffer)
+                GL.glBufferData(
+                    GL.GL_ARRAY_BUFFER, vertex_stream.buffer, GL.GL_STATIC_DRAW
+                )
 
-            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vertex_buffer)
-            GL.glBufferData(GL.GL_ARRAY_BUFFER, self.vertices, GL.GL_STATIC_DRAW)
+                for layout_element in vertex_stream.layout:
+                    match layout_element.gl_type:
+                        case GL.GL_INT | GL.GL_UNSIGNED_INT:
+                            GL.glVertexAttribIPointer(
+                                layout_element.index,
+                                layout_element.size,
+                                layout_element.gl_type,
+                                layout_element.stride,
+                                ctypes.c_void_p(layout_element.offset),
+                            )
+                        case _:
+                            GL.glVertexAttribPointer(
+                                layout_element.index,
+                                layout_element.size,
+                                layout_element.gl_type,
+                                False,
+                                layout_element.stride,
+                                ctypes.c_void_p(layout_element.offset),
+                            )
+                    GL.glEnableVertexAttribArray(layout_element.index)
 
-            for layout_element in self.layout:
-                match layout_element.gl_type:
-                    case GL.GL_INT | GL.GL_UNSIGNED_INT:
-                        GL.glVertexAttribIPointer(
-                            layout_element.index,
-                            layout_element.size,
-                            layout_element.gl_type,
-                            layout_element.stride,
-                            ctypes.c_void_p(layout_element.offset),
-                        )
-                    case _:
-                        GL.glVertexAttribPointer(
-                            layout_element.index,
-                            layout_element.size,
-                            layout_element.gl_type,
-                            False,
-                            layout_element.stride,
-                            ctypes.c_void_p(layout_element.offset),
-                        )
-                GL.glEnableVertexAttribArray(layout_element.index)
-
-            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
-            GL.glBufferData(
-                GL.GL_ELEMENT_ARRAY_BUFFER,
-                self.indices,
-                GL.GL_STATIC_DRAW,
-            )
+            if self.index_stream is not None:
+                self.index_buffer = GL.glGenBuffers(1)
+                GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.index_buffer)
+                GL.glBufferData(
+                    GL.GL_ELEMENT_ARRAY_BUFFER,
+                    self.index_stream.buffer,
+                    GL.GL_STATIC_DRAW,
+                )
 
             GL.glBindVertexArray(0)
 
         def destroy(self):
             GL.glDeleteVertexArrays(1, [self.handle])
-            GL.glDeleteBuffers(1, [self.vertex_buffer])
-            GL.glDeleteBuffers(1, [self.index_buffer])
+
+            for vertex_buffer in self.vertex_buffers:
+                GL.glDeleteBuffers(1, [self.vertex_buffer])
+
+            if self.index_buffer is not None:
+                GL.glDeleteBuffers(1, [self.index_buffer])
 
             self.handle = None
             self.vertex_buffer = None
             self.index_buffer = None
 
         def draw(self):
-            GL.glBindVertexArray(self.handle)
-            GL.glDrawElements(
-                GL.GL_TRIANGLES, self.num_indices, GL.GL_UNSIGNED_INT, None
-            )
+            if self.index_stream is not None:
+                GL.glBindVertexArray(self.handle)
+                GL.glDrawElements(
+                    GL.GL_TRIANGLES,
+                    self.index_stream.num_indices,
+                    self.index_stream.gl_type,
+                    None,
+                )
+            else:
+                GL.glBindVertexArray(self.handle)
+                GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.num_vertices)
 
     class ScenePose:
         def __init__(self, num_matrices: int):
@@ -3634,10 +3691,18 @@ class PssgViewerFrame(wx.Frame):
                 vs_source=SKINNED_VERTEX_SHADER, fs_source=MESH_FRAGMENT_SHADER
             )
             self.gl_screen_mesh = PssgViewerFrame.SceneMesh(
-                PssgViewerFrame.SceneMesh.POS_LAYOUT,
-                (ctypes.c_float * len(QUAD_VERTICES))(*QUAD_VERTICES),
-                (ctypes.c_uint32 * len(QUAD_INDICES))(*QUAD_INDICES),
-                len(QUAD_INDICES),
+                num_vertices=4,
+                vertex_streams=[
+                    PssgViewerFrame.SceneMesh.VertexStream(
+                        buffer=(ctypes.c_float * len(QUAD_VERTICES))(*QUAD_VERTICES),
+                        layout=PssgViewerFrame.SceneMesh.POS_LAYOUT,
+                    )
+                ],
+                index_stream=PssgViewerFrame.SceneMesh.IndexStream(
+                    buffer=(ctypes.c_uint32 * len(QUAD_INDICES))(*QUAD_INDICES),
+                    num_indices=len(QUAD_INDICES),
+                    gl_type=GL.GL_UNSIGNED_INT,
+                ),
             )
 
             self.pssg_tree = PssgModelTree(element)
@@ -4098,16 +4163,53 @@ class PssgViewerFrame(wx.Frame):
             self.render_target = None
 
         def _init_pssg_model_resources(self):
+            PSSG_LAYOUTS = {}
+            PSSG_LAYOUTS[PssgModelTree.PssgVertexAttribute.POSITION.value] = (
+                PssgViewerFrame.SceneMesh.POS_LAYOUT
+            )
+            PSSG_LAYOUTS[PssgModelTree.PssgVertexAttribute.UV.value] = (
+                PssgViewerFrame.SceneMesh.UV_LAYOUT
+            )
+            PSSG_LAYOUTS[PssgModelTree.PssgVertexAttribute.COLOR.value] = (
+                PssgViewerFrame.SceneMesh.COLOR_LAYOUT
+            )
+            PSSG_LAYOUTS[PssgModelTree.PssgVertexAttribute.NORMAL.value] = (
+                PssgViewerFrame.SceneMesh.NORMAL_LAYOUT
+            )
+            PSSG_LAYOUTS[PssgModelTree.PssgVertexAttribute.SKINWEIGHT.value] = (
+                PssgViewerFrame.SceneMesh.SKINWEIGHT_LAYOUT
+            )
+            PSSG_LAYOUTS[PssgModelTree.PssgVertexAttribute.SKINJOINT.value] = (
+                PssgViewerFrame.SceneMesh.SKINJOINT_LAYOUT
+            )
+
             for id, render_instance in self.pssg_tree.render_instances.items():
+                vertex_streams = []
+                index_stream = None
+
+                for vertex_stream in render_instance.vertex_streams:
+                    vertex_streams.append(
+                        PssgViewerFrame.SceneMesh.VertexStream(
+                            buffer=(
+                                ctypes.c_ubyte * len(vertex_stream.buffer)
+                            ).from_buffer(vertex_stream.buffer),
+                            layout=PSSG_LAYOUTS[vertex_stream.attribute.value],
+                        )
+                    )
+
+                if render_instance.index_buffer is not None:
+                    index_stream = PssgViewerFrame.SceneMesh.IndexStream(
+                        buffer=(
+                            ctypes.c_ubyte * len(render_instance.index_buffer)
+                        ).from_buffer(render_instance.index_buffer),
+                        num_indices=render_instance.num_indices,
+                        gl_type=GL.GL_UNSIGNED_INT,
+                    )
+
                 self.pssg_meshes[id] = PssgViewerFrame.SceneMesh(
-                    PssgViewerFrame.SceneMesh.DEFAULT_SKINNED_LAYOUT,
-                    (ctypes.c_ubyte * len(render_instance.vertex_buffer)).from_buffer(
-                        render_instance.vertex_buffer
-                    ),
-                    (ctypes.c_ubyte * len(render_instance.index_buffer)).from_buffer(
-                        render_instance.index_buffer
-                    ),
-                    render_instance.num_indices,
+                    num_vertices=render_instance.num_vertices,
+                    vertex_streams=vertex_streams,
+                    index_stream=index_stream,
                 )
                 self.pssg_meshes[id].start()
 
