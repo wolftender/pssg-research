@@ -4752,7 +4752,7 @@ class PssgGltfBuilder:
 
     def __init__(self, model: PssgModelTree, motion: PssgMotionTree):
         self.pssg_model = model
-        self.pssg_motion = motion
+        self.pssg_motions = motion
 
     def convert(self, out_path: str):
         self.gltf = pygltflib.GLTF2()
@@ -4772,6 +4772,7 @@ class PssgGltfBuilder:
         self.gltf_scene.nodes = [root_node_id]
 
         self._process_skinned_nodes()
+        self._convert_motions()
 
         self.gltf.bufferViews = self.buffer_views
         self.gltf.accessors = self.accessors
@@ -5051,6 +5052,119 @@ class PssgGltfBuilder:
         )
 
         return material_index
+
+    def _convert_motions(self):
+        PSSG_TARGET_TO_GLTF = [
+            "translation",
+            "rotation",
+            "scale",
+        ]
+
+        for pssg_motion_id, pssg_motion in self.pssg_motions.animations.items():
+            gltf_samplers = []
+            gltf_channels = []
+
+            for pssg_channel in pssg_motion.channels:
+                accessors = self._pack_motion_buffer(
+                    pssg_channel.target_property,
+                    pssg_channel.time_series,
+                    pssg_channel.data_series,
+                )
+                if accessors is None:
+                    continue
+
+                if pssg_channel.target_node not in self.pssg_to_gltf_node:
+                    logging.warning("%s does not exist, invalid motion target", pssg_channel.target_node)
+                    continue
+
+                acc_time, acc_value = accessors
+                sampler_index = len(gltf_samplers)
+                gltf_samplers.append(
+                    pygltflib.AnimationSampler(
+                        input=acc_time, output=acc_value, interpolation="LINEAR"
+                    )
+                )
+
+                gltf_channels.append(
+                    pygltflib.AnimationChannel(
+                        sampler=sampler_index,
+                        target=pygltflib.AnimationChannelTarget(
+                            node=self.pssg_to_gltf_node[pssg_channel.target_node],
+                            path=PSSG_TARGET_TO_GLTF[
+                                pssg_channel.target_property.value
+                            ],
+                        ),
+                    )
+                )
+
+            self.gltf.animations.append(pygltflib.Animation(name=pssg_motion_id, samplers=gltf_samplers, channels=gltf_channels))
+
+    def _pack_motion_buffer(
+        self,
+        target: PssgMotionTree.TargetProperty,
+        time_series: list[float],
+        value_series: list[float],
+    ) -> Optional[tuple[int, int]]:
+        PSSG_MOTION_PROPERTY_TO_TYPE = [
+            (3, pygltflib.VEC3),
+            (4, pygltflib.VEC4),
+            (3, pygltflib.VEC3),
+        ]
+
+        if target.value >= len(PSSG_MOTION_PROPERTY_TO_TYPE):
+            logging.warning(
+                "gltf animation serialization is not implemented for %s", target.name
+            )
+            return None
+
+        value_series_stride, value_series_type = PSSG_MOTION_PROPERTY_TO_TYPE[
+            target.value
+        ]
+
+        time_series_len = len(time_series)
+        time_series_buffer = bytearray(4 * time_series_len)
+        value_series_buffer = bytearray((4 * value_series_stride) * time_series_len)
+
+        time_min = None
+        time_max = None
+
+        for i in range(time_series_len):
+            struct.pack_into("<f", time_series_buffer, 4 * i, time_series[i])
+
+            if time_min is None:
+                time_min = time_series[i]
+            else:
+                time_min = min(time_series[i], time_min)
+
+            if time_max is None:
+                time_max = time_series[i]
+            else:
+                time_max = max(time_series[i], time_max)
+
+            for j in range(value_series_stride):
+                offs = i * value_series_stride + j
+                struct.pack_into(
+                    "<f", value_series_buffer, 4 * offs, value_series[offs]
+                )
+
+        acc_time = self._add_accessor_and_view(
+            data=time_series_buffer,
+            target=None,
+            accessor_type=pygltflib.SCALAR,
+            component_type=pygltflib.FLOAT,
+            count=time_series_len,
+            min_=[time_min],
+            max_=[time_max],
+        )
+        acc_value = self._add_accessor_and_view(
+            data=value_series_buffer,
+            target=None,
+            accessor_type=value_series_type,
+            component_type=pygltflib.FLOAT,
+            count=time_series_len,
+        )
+
+        return (acc_time, acc_value)
 
     def _add_accessor_and_view(
         self,
