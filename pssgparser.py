@@ -1,3 +1,4 @@
+import io
 import sys
 import struct
 import argparse
@@ -14,6 +15,9 @@ from array import array
 from enum import Enum, auto
 from typing import Any, Optional, Union, Iterator, overload, NamedTuple
 from dataclasses import dataclass, field
+
+import pygltflib
+from PIL import Image
 
 import wx
 import wx.dataview
@@ -2411,7 +2415,9 @@ class PssgModelTree:
 
                 render_instance.texture = self.textures[texture_id]
 
-    def _parse_pssg_vertex_stream(self, render_stream: PssgElement) -> Optional[PssgVertexStream]:
+    def _parse_pssg_vertex_stream(
+        self, render_stream: PssgElement
+    ) -> Optional[PssgVertexStream]:
         LAYOUT_PER_RENDER_TYPE = {
             "Vertex": (self.PssgVertexAttribute.POSITION, PssgArrayBufferType.FLOAT3),
             "ST": (self.PssgVertexAttribute.UV, PssgArrayBufferType.FLOAT2),
@@ -2557,14 +2563,16 @@ class PssgModelTree:
 
         COLOR_STRIDE = FLOAT_SIZE * 3
         color_stream = self.PssgVertexStream(
-                id=f"{render_data_source_id}_COLOR",
-                attribute= self.PssgVertexAttribute.COLOR,
-                format=PssgArrayBufferType.FLOAT3,
-                element_count=num_vertices,
-                buffer=bytearray(COLOR_STRIDE * num_vertices),
-            )
+            id=f"{render_data_source_id}_COLOR",
+            attribute=self.PssgVertexAttribute.COLOR,
+            format=PssgArrayBufferType.FLOAT3,
+            element_count=num_vertices,
+            buffer=bytearray(COLOR_STRIDE * num_vertices),
+        )
         for i in range(num_vertices):
-            struct.pack_into("<3f", color_stream.buffer, i * COLOR_STRIDE, 1.0, 1.0, 1.0)
+            struct.pack_into(
+                "<3f", color_stream.buffer, i * COLOR_STRIDE, 1.0, 1.0, 1.0
+            )
 
         result.vertex_streams.append(color_stream)
         result.num_vertices = num_vertices
@@ -2641,31 +2649,33 @@ class PssgModelTree:
                         logging.error("unknown modifier network %s", network_type)
                         continue
 
-                    result.render_data_sources.append(self._parse_pssg_morph_network_node(network, child))
+                    result.render_data_sources.append(
+                        self._parse_pssg_morph_network_node(network, child)
+                    )
                 else:
                     logging.warning("unhandled node type %s", child.name)
 
         self.rendernodes[result.id] = result
         return result
 
-    def _parse_pssg_skin_network_node(self, network_instance: PssgElement) -> PssgRenderInstance:
+    def _parse_pssg_skin_network_node(
+        self, network_instance: PssgElement
+    ) -> PssgRenderInstance:
         network_instance_id = str(network_instance.get_attribute("id").value)
         render_instance_source = network_instance.find_child("RENDERINSTANCESOURCE")
         if render_instance_source is None:
-            raise Exception(f"skin network {network_instance_id} is missing RENDERINSTANCESOURCE")
+            raise Exception(
+                f"skin network {network_instance_id} is missing RENDERINSTANCESOURCE"
+            )
 
         shader_instance_id: str = network_instance.get_attribute("shader").value
-        render_data_src_id: str = render_instance_source.get_attribute(
-            "source"
-        ).value
+        render_data_src_id: str = render_instance_source.get_attribute("source").value
 
         render_data_source = self._find_pssg_render_data_source(
             render_data_src_id.lstrip("#")
         )
         if render_data_source is None:
-            raise Exception(
-                f"render data source {render_data_src_id} does not exist"
-            )
+            raise Exception(f"render data source {render_data_src_id} does not exist")
 
         shader_instance = self._find_pssg_shader_instance(
             shader_instance_id.lstrip("#")
@@ -2678,11 +2688,15 @@ class PssgModelTree:
 
         return render_instance
 
-    def _parse_pssg_morph_network_node(self, network: PssgElement, network_instance: PssgElement) -> PssgRenderInstance:
+    def _parse_pssg_morph_network_node(
+        self, network: PssgElement, network_instance: PssgElement
+    ) -> PssgRenderInstance:
         network_input_streams = []
 
         render_instance_sources = network_instance.find_children("RENDERINSTANCESOURCE")
-        modifier_inputs = network_instance.find_children("MODIFIERNETWORKINSTANCEMODIFIERINPUT")
+        modifier_inputs = network_instance.find_children(
+            "MODIFIERNETWORKINSTANCEMODIFIERINPUT"
+        )
         network_instance_id = str(network_instance.get_attribute("id").value)
 
         result = self.PssgRenderInstance(id=network_instance_id)
@@ -2698,20 +2712,24 @@ class PssgModelTree:
         if morph_weights_element is None:
             raise Exception(f"invalid morph weights {morph_weights_id} reference")
 
-        morph_weight_count = int(morph_weights_element.get_attribute("weightCount").value)
+        morph_weight_count = int(
+            morph_weights_element.get_attribute("weightCount").value
+        )
         weights_object = morph_weights_element.find_child("WEIGHTS")
         if weights_object is None:
-            raise Exception(f"invalid morph weights {morph_weights_id} reference - no weights inside")
+            raise Exception(
+                f"invalid morph weights {morph_weights_id} reference - no weights inside"
+            )
 
         result.morph_weights = weights_object.value
 
         # shader parsing
         shader_instance_id: str = network_instance.get_attribute("shader").value
-        shader_instance = self._find_pssg_shader_instance( shader_instance_id.lstrip("#"))
+        shader_instance = self._find_pssg_shader_instance(
+            shader_instance_id.lstrip("#")
+        )
         if shader_instance is None:
-            raise Exception(
-                f"shader instance {shader_instance_id} does not exist"
-            )
+            raise Exception(f"shader instance {shader_instance_id} does not exist")
 
         self._parse_pssg_shader_instance(result, shader_instance)
 
@@ -2720,39 +2738,55 @@ class PssgModelTree:
             modifier_input_source = int(modifier_input.get_attribute("source").value)
             modifier_input_stream = int(modifier_input.get_attribute("stream").value)
 
-            render_data_source_id = str(render_instance_sources[modifier_input_source].get_attribute("source").value).lstrip("#")
-            render_data_source = self._find_pssg_render_data_source(render_data_source_id)
+            render_data_source_id = str(
+                render_instance_sources[modifier_input_source]
+                .get_attribute("source")
+                .value
+            ).lstrip("#")
+            render_data_source = self._find_pssg_render_data_source(
+                render_data_source_id
+            )
 
             if render_data_source is None:
-                raise Exception(f"render data source {render_data_source_id} does not exist")
-            
+                raise Exception(
+                    f"render data source {render_data_source_id} does not exist"
+                )
+
             source_stream_list = render_data_source.find_children("RENDERSTREAM")
             network_input_streams.append(source_stream_list[modifier_input_stream])
 
         # parsing network inputs
         morph_channel_count = None
         num_vertices = None
-        
+
         network_entries = network.find_children("MODIFIERNETWORKENTRY")
 
-        def _extract_n_morphs(network_entry: PssgElement, network_entry_name: str, n: int):
+        def _extract_n_morphs(
+            network_entry: PssgElement, network_entry_name: str, n: int
+        ):
             nonlocal num_vertices
             nonlocal morph_channel_count
 
             vertex_streams = []
-            
+
             connections = network_entry.find_children("MODIFIERNETWORKCONNECTION")
             for connection in connections:
                 connection_modifier = int(connection.get_attribute("modifier").value)
                 connection_stream = int(connection.get_attribute("stream").value)
 
                 if connection_modifier != -1:
-                    raise Exception(f"network {network_instance_id}, entry {network_entry_name}: modifier {connection_modifier} is not supported by the simplified parser")
-                
-                vertex_stream = self._parse_pssg_vertex_stream(network_input_streams[connection_stream])
+                    raise Exception(
+                        f"network {network_instance_id}, entry {network_entry_name}: modifier {connection_modifier} is not supported by the simplified parser"
+                    )
+
+                vertex_stream = self._parse_pssg_vertex_stream(
+                    network_input_streams[connection_stream]
+                )
                 if vertex_stream is None:
-                    raise Exception(f"error in network {network_instance_id}, entry {network_entry_name} has invalid stream {connection_stream}")
-                
+                    raise Exception(
+                        f"error in network {network_instance_id}, entry {network_entry_name} has invalid stream {connection_stream}"
+                    )
+
                 if num_vertices is None:
                     num_vertices = vertex_stream.element_count
 
@@ -2762,11 +2796,16 @@ class PssgModelTree:
                 morph_channel_count = n
             elif morph_channel_count != n:
                 raise Exception("morph count mismatch between input channels")
-            
+
             morph_channel_count = n
             result.vertex_streams.append(vertex_streams[0])
             for i in range(1, n):
-                result.morph_targets.append(self.PssgMorphTarget(id=f"{network_instance_id}_{i}",vertex_streams=vertex_streams[i]))
+                result.morph_targets.append(
+                    self.PssgMorphTarget(
+                        id=f"{network_instance_id}_{i}",
+                        vertex_streams=vertex_streams[i],
+                    )
+                )
 
         for network_entry in network_entries:
             network_entry_name = str(network_entry.get_attribute("name").value)
@@ -2776,24 +2815,34 @@ class PssgModelTree:
 
                 case "Morph33":
                     _extract_n_morphs(network_entry, network_entry_name, 3)
-                    
+
                 case "SkinLocal":
-                    connections = network_entry.find_children("MODIFIERNETWORKCONNECTION")
+                    connections = network_entry.find_children(
+                        "MODIFIERNETWORKCONNECTION"
+                    )
                     for connection in connections:
-                        connection_modifier = int(connection.get_attribute("modifier").value)
-                        connection_stream = int(connection.get_attribute("stream").value)
+                        connection_modifier = int(
+                            connection.get_attribute("modifier").value
+                        )
+                        connection_stream = int(
+                            connection.get_attribute("stream").value
+                        )
 
                         if connection_modifier != -1:
                             continue
 
-                        vertex_stream = self._parse_pssg_vertex_stream(network_input_streams[connection_stream])
+                        vertex_stream = self._parse_pssg_vertex_stream(
+                            network_input_streams[connection_stream]
+                        )
                         if vertex_stream is not None:
                             result.vertex_streams.append(vertex_stream)
 
                             if num_vertices is None:
                                 num_vertices = vertex_stream.element_count
                         else:
-                            raise Exception(f"error in network {network_instance_id}, entry {network_entry_name} has invalid stream")
+                            raise Exception(
+                                f"error in network {network_instance_id}, entry {network_entry_name} has invalid stream"
+                            )
                 case _:
                     logging.error("bad network %s", network_entry_name)
 
@@ -2803,20 +2852,24 @@ class PssgModelTree:
         # append color artificially
         COLOR_STRIDE = 12
         color_stream = self.PssgVertexStream(
-                id=f"{network_instance_id}_COLOR",
-                attribute= self.PssgVertexAttribute.COLOR,
-                format=PssgArrayBufferType.FLOAT3,
-                element_count=num_vertices,
-                buffer=bytearray(COLOR_STRIDE * num_vertices),
-            )
+            id=f"{network_instance_id}_COLOR",
+            attribute=self.PssgVertexAttribute.COLOR,
+            format=PssgArrayBufferType.FLOAT3,
+            element_count=num_vertices,
+            buffer=bytearray(COLOR_STRIDE * num_vertices),
+        )
         for i in range(num_vertices):
-            struct.pack_into("<3f", color_stream.buffer, i * COLOR_STRIDE, 1.0, 1.0, 1.0)
+            struct.pack_into(
+                "<3f", color_stream.buffer, i * COLOR_STRIDE, 1.0, 1.0, 1.0
+            )
 
         result.vertex_streams.append(color_stream)
 
         result.num_vertices = num_vertices
         self.render_instances[result.id] = result
-        self.morph_instances[morph_weights_id] = result # link by the weights id is required by animations later on
+        self.morph_instances[morph_weights_id] = (
+            result  # link by the weights id is required by animations later on
+        )
         return result
 
     def _parse_pssg_skin_node(self, node: PssgElement) -> PssgModelNode:
@@ -2839,16 +2892,20 @@ class PssgModelTree:
             match child.name:
                 case "MODIFIERNETWORKINSTANCE":
                     network_type = str(child.get_attribute("network").value).lstrip("#")
-                    
+
                     if network_type == "PSSGInternalDatabase#skinTransformLocal":
-                        result.render_data_sources.append(self._parse_pssg_skin_network_node(child))
+                        result.render_data_sources.append(
+                            self._parse_pssg_skin_network_node(child)
+                        )
                     else:
                         network = self._find_pssg_mod_network(network_type)
                         if network is None:
                             logging.error("unknown modifier network %s", network_type)
                             continue
 
-                        result.render_data_sources.append(self._parse_pssg_morph_network_node(network, child))
+                        result.render_data_sources.append(
+                            self._parse_pssg_morph_network_node(network, child)
+                        )
 
                 case "SKINJOINT":
                     skinjoints.append(child)
@@ -2863,9 +2920,7 @@ class PssgModelTree:
 
         for i in range(len(skinjoints)):
             inverse_bind = Matrix4x4(inverse_binds[i].value).transpose()
-            skin_joint_id = str(
-                skinjoints[i].get_attribute("joint").value.lstrip("#")
-            )
+            skin_joint_id = str(skinjoints[i].get_attribute("joint").value.lstrip("#"))
             result.skin_joints.append(
                 PssgModelTree.PssgSkinJoint(skin_joint_id, inverse_bind)
             )
@@ -2875,12 +2930,12 @@ class PssgModelTree:
         return result
 
     def _get_library(self, type: str) -> PssgElement:
-            library = self._find_library(type)
-            if library is not None:
-                return library
-    
-            raise Exception(f"cannot find a pssg library of type {type}")
-    
+        library = self._find_library(type)
+        if library is not None:
+            return library
+
+        raise Exception(f"cannot find a pssg library of type {type}")
+
     def _find_library(self, type: str) -> Optional[PssgElement]:
         if len(self.pssg_libraries) == 0:
             self.pssg_libraries = self.pssg_model.find_children("LIBRARY")
@@ -4653,10 +4708,347 @@ class PssgViewerFrame(wx.Frame):
         self.canvas.play_motion(name)
 
 
+PSSG_TO_GLTF_ACCESSOR = {
+    "FLOAT": (pygltflib.FLOAT, pygltflib.SCALAR, "float32"),
+    "FLOAT2": (pygltflib.FLOAT, pygltflib.VEC2, "float32"),
+    "FLOAT3": (pygltflib.FLOAT, pygltflib.VEC3, "float32"),
+    "FLOAT4": (pygltflib.FLOAT, pygltflib.VEC4, "float32"),
+    "CHAR": (pygltflib.BYTE, pygltflib.SCALAR, "int8"),
+    "CHAR2": (pygltflib.BYTE, pygltflib.VEC2, "int8"),
+    "CHAR3": (pygltflib.BYTE, pygltflib.VEC3, "int8"),
+    "CHAR4": (pygltflib.BYTE, pygltflib.VEC4, "int8"),
+    "UCHAR": (pygltflib.UNSIGNED_BYTE, pygltflib.SCALAR, "uint8"),
+    "UCHAR2": (pygltflib.UNSIGNED_BYTE, pygltflib.VEC2, "uint8"),
+    "UCHAR3": (pygltflib.UNSIGNED_BYTE, pygltflib.VEC3, "uint8"),
+    "UCHAR4": (pygltflib.UNSIGNED_BYTE, pygltflib.VEC4, "uint8"),
+    "SHORT": (pygltflib.SHORT, pygltflib.SCALAR, "int16"),
+    "SHORT2": (pygltflib.SHORT, pygltflib.VEC2, "int16"),
+    "SHORT3": (pygltflib.SHORT, pygltflib.VEC3, "int16"),
+    "SHORT4": (pygltflib.SHORT, pygltflib.VEC4, "int16"),
+    "USHORT": (pygltflib.UNSIGNED_SHORT, pygltflib.SCALAR, "uint16"),
+    "USHORT2": (pygltflib.UNSIGNED_SHORT, pygltflib.VEC2, "uint16"),
+    "USHORT3": (pygltflib.UNSIGNED_SHORT, pygltflib.VEC3, "uint16"),
+    "USHORT4": (pygltflib.UNSIGNED_SHORT, pygltflib.VEC4, "uint16"),
+    "UINT": (pygltflib.UNSIGNED_INT, pygltflib.SCALAR, "uint32"),
+    "UINT2": (pygltflib.UNSIGNED_INT, pygltflib.VEC2, "uint32"),
+    "UINT3": (pygltflib.UNSIGNED_INT, pygltflib.VEC3, "uint32"),
+    "UINT4": (pygltflib.UNSIGNED_INT, pygltflib.VEC4, "uint32"),
+    "INT": None,
+    "INT2": None,
+    "INT3": None,
+    "INT4": None,
+}
+
+
+class PssgGltfBuilder:
+    gltf: pygltflib.GLTF2
+    gltf_scene: pygltflib.Scene
+    buffer_views: list[pygltflib.BufferView]
+    accessors: list[pygltflib.Accessor]
+    binary_blob: bytearray
+
+    def __init__(self, model: PssgModelTree, motion: PssgMotionTree):
+        self.pssg_model = model
+        self.pssg_motion = motion
+
+    def convert(self, out_path: str):
+        self.gltf = pygltflib.GLTF2()
+        self.gltf_scene = pygltflib.Scene()
+        self.gltf.asset = pygltflib.Asset(
+            version="2.0", generator="Atelier Meruru PSSG exporter"
+        )
+
+        self.buffer_views = []
+        self.accessors = []
+        self.binary_blob = bytearray()
+
+        root_node_id = self._recursive_node_parse(None, self.pssg_model.root)
+        self.gltf_scene.nodes = [root_node_id]
+
+        self.gltf.bufferViews = self.buffer_views
+        self.gltf.accessors = self.accessors
+        self.gltf.buffers = [pygltflib.Buffer(byteLength=len(self.binary_blob))]
+        self.gltf.set_binary_blob(bytes(self.binary_blob))
+        self.gltf.scenes.append(self.gltf_scene)
+
+        self.gltf.save(out_path)
+
+    def _recursive_node_parse(
+        self, parent: Optional[pygltflib.Node], pssg_node: PssgModelTree.PssgModelNode
+    ) -> int:
+        logging.info("exporting node %s", pssg_node.id)
+
+        gltf_node = pygltflib.Node(
+            name=pssg_node.id,
+            translation=[
+                pssg_node.bind_translation.x,
+                pssg_node.bind_translation.y,
+                pssg_node.bind_translation.z,
+            ],
+            rotation=[
+                pssg_node.bind_rotation.x,
+                pssg_node.bind_rotation.y,
+                pssg_node.bind_rotation.z,
+                pssg_node.bind_rotation.w,
+            ],
+            scale=[
+                pssg_node.bind_scale.x,
+                pssg_node.bind_scale.y,
+                pssg_node.bind_scale.z,
+            ],
+        )
+
+        if isinstance(pssg_node, PssgModelTree.PssgModelSkinnedNode):
+            pass
+
+        PSSG_ATTRIB_MAPPING = {
+            PssgModelTree.PssgVertexAttribute.POSITION.value: "POSITION",
+            PssgModelTree.PssgVertexAttribute.UV.value: "TEXCOORD_0",
+            PssgModelTree.PssgVertexAttribute.COLOR.value: "COLOR_0",
+            PssgModelTree.PssgVertexAttribute.NORMAL.value: "NORMAL",
+            PssgModelTree.PssgVertexAttribute.SKINWEIGHT.value: "WEIGHTS_0",
+            PssgModelTree.PssgVertexAttribute.SKINJOINT.value: "JOINTS_0",
+        }
+
+        if (
+            isinstance(pssg_node, PssgModelTree.PssgModelRenderNode)
+            and len(pssg_node.render_data_sources) != 0
+        ):
+            gltf_primitives: list[pygltflib.Primitive] = []
+
+            for render_instance in pssg_node.render_data_sources:
+                logging.info("exporting render data source %s", render_instance.id)
+
+                gltf_attributes = pygltflib.Attributes()
+                for pssg_vertex_stream in render_instance.vertex_streams:
+                    pssg_vertex_attrib = pssg_vertex_stream.attribute
+                    type_mapping = PSSG_TO_GLTF_ACCESSOR[pssg_vertex_stream.format.name]
+
+                    if type_mapping is None:
+                        raise Exception(
+                            f"unsupported format for pygltf export {pssg_vertex_stream.format.name}"
+                        )
+
+                    min_ = None
+                    max_ = None
+
+                    # according to gltf spec we need to do that
+                    if pssg_vertex_attrib == PssgModelTree.PssgVertexAttribute.POSITION:
+                        dst_scalar_type, dst_components = (
+                            pssg_vertex_stream.format.value
+                        )
+                        dst_code, dst_byte_width = dst_scalar_type.value
+                        dst_stride = dst_byte_width * dst_components
+                        for i in range(pssg_vertex_stream.element_count):
+                            value = struct.unpack_from(
+                                f"<{dst_components}{dst_code}",
+                                pssg_vertex_stream.buffer,
+                                dst_stride * i,
+                            )
+                            if min_ is None or max_ is None:
+                                min_ = list(value)
+                                max_ = list(value)
+                            else:
+                                min_ = [min(a, b) for a, b in zip(min_, value)]
+                                max_ = [max(a, b) for a, b in zip(max_, value)]
+
+                    component_type, accessor_type, _ = type_mapping
+
+                    gltf_buffer = pssg_vertex_stream.buffer
+                    if (
+                        pssg_vertex_attrib
+                        == PssgModelTree.PssgVertexAttribute.SKINJOINT
+                    ):
+                        gltf_buffer = bytearray(8 * pssg_vertex_stream.element_count)
+                        component_type = pygltflib.UNSIGNED_SHORT
+                        accessor_type = pygltflib.VEC4
+
+                        pssg_transmute_buffer(
+                            src_data=pssg_vertex_stream.buffer,
+                            src_type=pssg_vertex_stream.format,
+                            src_offset=0,
+                            src_stride=0,
+                            dst_data=gltf_buffer,
+                            dst_type=PssgArrayBufferType.USHORT4,
+                            dst_offset=0,
+                            dst_stride=0,
+                            count=pssg_vertex_stream.element_count,
+                            src_endian="<",
+                            dst_endian="<",
+                        )
+
+                    setattr(
+                        gltf_attributes,
+                        PSSG_ATTRIB_MAPPING[pssg_vertex_attrib.value],
+                        self._add_accessor_and_view(
+                            data=gltf_buffer,
+                            target=pygltflib.ARRAY_BUFFER,
+                            accessor_type=accessor_type,
+                            component_type=component_type,
+                            count=pssg_vertex_stream.element_count,
+                            min_=min_,
+                            max_=max_,
+                        ),
+                    )
+
+                # convert indices
+                if render_instance.index_buffer is not None:
+                    ib_accessor = self._add_accessor_and_view(
+                        data=render_instance.index_buffer,
+                        target=pygltflib.ELEMENT_ARRAY_BUFFER,
+                        accessor_type=pygltflib.SCALAR,
+                        component_type=pygltflib.UNSIGNED_INT,
+                        count=render_instance.num_indices,
+                    )
+                else:
+                    ib_accessor = None
+
+                # convert material
+                gltf_material = (
+                    self._add_rgba_texture_material(render_instance.texture)
+                    if render_instance.texture is not None
+                    else None
+                )
+                gltf_primitives.append(
+                    pygltflib.Primitive(
+                        attributes=gltf_attributes,
+                        indices=ib_accessor,
+                        material=gltf_material,
+                    )
+                )
+
+            gltf_mesh = pygltflib.Mesh(name=pssg_node.id, primitives=gltf_primitives)
+            mesh_index = len(self.gltf.meshes)
+            self.gltf.meshes.append(gltf_mesh)
+            gltf_node.mesh = mesh_index
+
+        node_id = self._append_node(parent, gltf_node)
+        for pssg_child in pssg_node.children:
+            self._recursive_node_parse(gltf_node, pssg_child)
+
+        return node_id
+
+    def _append_node(
+        self, parent: Optional[pygltflib.Node], node: pygltflib.Node
+    ) -> int:
+        node_id = len(self.gltf.nodes)
+        self.gltf.nodes.append(node)
+
+        if parent is not None:
+            if parent.children is None:
+                parent.children = []
+
+            parent.children.append(node_id)
+
+        return node_id
+
+    def _add_rgba_texture_material(self, pssg_texture: PssgDecodedTexture) -> int:
+        image = Image.frombytes(
+            "RGBA",
+            (pssg_texture.width, pssg_texture.height),
+            bytes(pssg_texture.texels),
+        )
+        png_buffer = io.BytesIO()
+        image.save(png_buffer, format="PNG")
+        png_bytes = png_buffer.getvalue()
+
+        while len(self.binary_blob) % 4 != 0:
+            self.binary_blob.extend(b"\0")
+
+        offset = len(self.binary_blob)
+        self.binary_blob.extend(png_bytes)
+
+        bv_index = len(self.buffer_views)
+        self.buffer_views.append(
+            pygltflib.BufferView(
+                buffer=0,
+                byteOffset=offset,
+                byteLength=len(png_bytes),
+            )
+        )
+
+        image_index = len(self.gltf.images)
+        self.gltf.images.append(
+            pygltflib.Image(bufferView=bv_index, mimeType="image/png")
+        )
+
+        sampler_index = len(self.gltf.samplers)
+        self.gltf.samplers.append(
+            pygltflib.Sampler(
+                magFilter=pygltflib.LINEAR,
+                minFilter=pygltflib.LINEAR_MIPMAP_LINEAR,
+                wrapS=pygltflib.REPEAT,
+                wrapT=pygltflib.REPEAT,
+            )
+        )
+
+        texture_index = len(self.gltf.textures)
+        self.gltf.textures.append(
+            pygltflib.Texture(
+                source=image_index,
+                sampler=sampler_index,
+            )
+        )
+
+        material_index = len(self.gltf.materials)
+        self.gltf.materials.append(
+            pygltflib.Material(
+                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+                    baseColorTexture=pygltflib.TextureInfo(
+                        index=texture_index, texCoord=0
+                    )
+                )
+            )
+        )
+
+        return material_index
+
+    def _add_accessor_and_view(
+        self,
+        data: bytearray,
+        target,
+        accessor_type,
+        component_type,
+        count: int,
+        min_=None,
+        max_=None,
+        normalized=False,
+    ) -> int:
+        while len(self.binary_blob) % 4 != 0:
+            self.binary_blob.extend(b"\0")
+
+        offset = len(self.binary_blob)
+        self.binary_blob.extend(data)
+
+        byte_length = len(data)
+        bv_index = len(self.buffer_views)
+
+        self.buffer_views.append(
+            pygltflib.BufferView(
+                buffer=0, byteOffset=offset, byteLength=byte_length, target=target
+            )
+        )
+        accessor_idx = len(self.accessors)
+        self.accessors.append(
+            pygltflib.Accessor(
+                bufferView=bv_index,
+                byteOffset=0,
+                componentType=component_type,
+                count=count,
+                type=accessor_type,
+                min=min_,
+                max=max_,
+                normalized=normalized,
+            )
+        )
+
+        return accessor_idx
+
+
 class PssgJsonEncoder(json.JSONEncoder):
     def default(self, o: Any) -> Any:
         if dataclasses.is_dataclass(o) and not isinstance(o, type):
-            return dataclasses.asdict(o)
+            return dataclasses.asdict(o, dict_factory=dict)
         if isinstance(o, Enum):
             return o.name
         if isinstance(o, bytes):
@@ -4765,6 +5157,38 @@ def _do_pssg(args) -> int:
     return 0
 
 
+def _do_gltf(args) -> int:
+    model_filename = args.model
+    motion_filename = args.motion
+    output_filename = args.output
+
+    try:
+        pssg_reader = PssgReader(model_filename)
+        motion_reader = PssgReader(motion_filename)
+
+        logging.info("loaded pssg file")
+
+        output_path = pathlib.Path(output_filename)
+        if output_path.is_dir():
+            raise Exception(f"{output_filename} is a directory")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        gltf_builder = PssgGltfBuilder(
+            model=PssgModelTree(pssg_reader.pssg_tree),
+            motion=PssgMotionTree(motion_reader.pssg_tree),
+        )
+        gltf_builder.convert(output_filename)
+
+    except Exception as e:
+        logging.error(
+            "failed to run pssg parser, this might be an issue with an unsupported file OR a bug in the viewer program: %s",
+            str(e),
+        )
+        return 1
+
+    return 0
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.DEBUG,
@@ -4805,6 +5229,21 @@ def main() -> int:
         help="parsed file structure will be written to this path",
     )
 
+    # gltf subcommand converter
+    arg_gltf_parser = arg_subparsers.add_parser("gltf", help="pssg to gltf converter")
+    arg_gltf_parser.add_argument(
+        "--model", required=True, type=str, help="input filename for pssg model"
+    )
+    arg_gltf_parser.add_argument(
+        "--motion", required=True, type=str, help="input filename for pssg motions"
+    )
+    arg_gltf_parser.add_argument(
+        "--output",
+        required=True,
+        type=str,
+        help="parsed file structure will be written to this path",
+    )
+
     args = arg_parser.parse_args()
 
     match args.command:
@@ -4813,6 +5252,9 @@ def main() -> int:
 
         case "pssg":
             return _do_pssg(args)
+
+        case "gltf":
+            return _do_gltf(args)
 
     return 0
 
