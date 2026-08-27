@@ -4746,6 +4746,9 @@ class PssgGltfBuilder:
     buffer_views: list[pygltflib.BufferView]
     accessors: list[pygltflib.Accessor]
     binary_blob: bytearray
+    pssg_to_gltf_node: dict[str, int]
+    process_skin_nodes: list[PssgModelTree.PssgModelSkinnedNode]
+    gltf_texture_cache: dict[str, int]
 
     def __init__(self, model: PssgModelTree, motion: PssgMotionTree):
         self.pssg_model = model
@@ -4761,9 +4764,14 @@ class PssgGltfBuilder:
         self.buffer_views = []
         self.accessors = []
         self.binary_blob = bytearray()
+        self.pssg_to_gltf_node = {}
+        self.process_skin_nodes = []
+        self.gltf_texture_cache = {}
 
         root_node_id = self._recursive_node_parse(None, self.pssg_model.root)
         self.gltf_scene.nodes = [root_node_id]
+
+        self._process_skinned_nodes()
 
         self.gltf.bufferViews = self.buffer_views
         self.gltf.accessors = self.accessors
@@ -4772,6 +4780,35 @@ class PssgGltfBuilder:
         self.gltf.scenes.append(self.gltf_scene)
 
         self.gltf.save(out_path)
+
+    def _process_skinned_nodes(self):
+        MATRIX_SIZE = 16 * 4
+
+        for skinned_node in self.process_skin_nodes:
+            num_joints = len(skinned_node.skin_joints)
+            inverse_bind_buffer = bytearray(num_joints * MATRIX_SIZE)
+            joints = []
+
+            for i in range(num_joints):
+                skin_joint = skinned_node.skin_joints[i]
+                pssg_joint_id = skin_joint.joint_id
+                inverse_bind = skin_joint.inverse_bind.transpose()
+                struct.pack_into(
+                    "<16f", inverse_bind_buffer, MATRIX_SIZE * i, *inverse_bind
+                )
+                joints.append(self.pssg_to_gltf_node[pssg_joint_id])
+
+            inverse_bind_accessor = self._add_accessor_and_view(
+                inverse_bind_buffer, None, pygltflib.MAT4, pygltflib.FLOAT, num_joints
+            )
+            gltf_skin = pygltflib.Skin(
+                name=f"{skinned_node.id}_skin",
+                joints=joints,
+                inverseBindMatrices=inverse_bind_accessor,
+            )
+            gltf_node_id = self.pssg_to_gltf_node[skinned_node.id]
+            self.gltf.nodes[gltf_node_id].skin = len(self.gltf.skins)
+            self.gltf.skins.append(gltf_skin)
 
     def _recursive_node_parse(
         self, parent: Optional[pygltflib.Node], pssg_node: PssgModelTree.PssgModelNode
@@ -4797,9 +4834,6 @@ class PssgGltfBuilder:
                 pssg_node.bind_scale.z,
             ],
         )
-
-        if isinstance(pssg_node, PssgModelTree.PssgModelSkinnedNode):
-            pass
 
         PSSG_ATTRIB_MAPPING = {
             PssgModelTree.PssgVertexAttribute.POSITION.value: "POSITION",
@@ -4922,7 +4956,12 @@ class PssgGltfBuilder:
             self.gltf.meshes.append(gltf_mesh)
             gltf_node.mesh = mesh_index
 
+        if isinstance(pssg_node, PssgModelTree.PssgModelSkinnedNode):
+            self.process_skin_nodes.append(pssg_node)
+
         node_id = self._append_node(parent, gltf_node)
+        self.pssg_to_gltf_node[pssg_node.id] = node_id
+
         for pssg_child in pssg_node.children:
             self._recursive_node_parse(gltf_node, pssg_child)
 
@@ -4942,7 +4981,11 @@ class PssgGltfBuilder:
 
         return node_id
 
-    def _add_rgba_texture_material(self, pssg_texture: PssgDecodedTexture) -> int:
+    def _add_rgba_texture(self, pssg_texture: PssgDecodedTexture) -> int:
+        if pssg_texture.id in self.gltf_texture_cache:
+            logging.debug("serving texture %s from cache", pssg_texture.id)
+            return self.gltf_texture_cache[pssg_texture.id]
+
         image = Image.frombytes(
             "RGBA",
             (pssg_texture.width, pssg_texture.height),
@@ -4989,6 +5032,12 @@ class PssgGltfBuilder:
                 sampler=sampler_index,
             )
         )
+
+        self.gltf_texture_cache[pssg_texture.id] = texture_index
+        return texture_index
+
+    def _add_rgba_texture_material(self, pssg_texture: PssgDecodedTexture) -> int:
+        texture_index = self._add_rgba_texture(pssg_texture)
 
         material_index = len(self.gltf.materials)
         self.gltf.materials.append(
