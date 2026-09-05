@@ -240,7 +240,7 @@ BASE_ELEMENT_TYPES: list[PssgBaseElement] = [
     PssgBaseElement("MODIFIERNETWORKINSTANCEUNIQUEINPUT", PssgElementType.NONE),
     PssgBaseElement("MODIFIERNETWORKINSTANCEDYNAMICSTREAMTYPE", PssgElementType.NONE),
     PssgBaseElement("USERDATA", PssgElementType.NONE),
-    PssgBaseElement("WEIGHTS", PssgElementType.BYTE),
+    PssgBaseElement("WEIGHTS", PssgElementType.FLOAT),
     PssgBaseElement("MORPHMODIFIERWEIGHTS", PssgElementType.NONE),
 ]
 
@@ -2767,6 +2767,9 @@ class PssgModelTree:
             nonlocal num_vertices
             nonlocal morph_channel_count
 
+            if len(result.morph_targets) == 0:
+                result.morph_targets = [self.PssgMorphTarget(id=f"{network_instance_id}_{i}") for i in range(n - 1)]
+
             vertex_streams = []
 
             connections = network_entry.find_children("MODIFIERNETWORKCONNECTION")
@@ -2799,13 +2802,8 @@ class PssgModelTree:
 
             morph_channel_count = n
             result.vertex_streams.append(vertex_streams[0])
-            for i in range(1, n):
-                result.morph_targets.append(
-                    self.PssgMorphTarget(
-                        id=f"{network_instance_id}_{i}",
-                        vertex_streams=vertex_streams[i],
-                    )
-                )
+            for i in range(n - 1):
+                result.morph_targets[i].vertex_streams.append(vertex_streams[i + 1])
 
         for network_entry in network_entries:
             network_entry_name = str(network_entry.get_attribute("name").value)
@@ -4811,6 +4809,35 @@ class PssgGltfBuilder:
             self.gltf.nodes[gltf_node_id].skin = len(self.gltf.skins)
             self.gltf.skins.append(gltf_skin)
 
+    @classmethod
+    def _min_max_vectors(cls, data: bytearray, num_components: int) -> tuple[list[float], list[float]]:
+        floats = array('f')
+        floats.frombytes(data)
+
+        if len(floats) % num_components != 0:
+            raise ValueError(
+                f"Buffer length ({len(floats)} floats) is not a multiple of "
+                f"num_components ({num_components})"
+            )
+
+        num_vectors = len(floats) // num_components
+        if num_vectors == 0:
+            raise ValueError("Buffer contains no vectors")
+
+        min_vec = list(floats[0:num_components])
+        max_vec = list(floats[0:num_components])
+
+        for i in range(1, num_vectors):
+            offset = i * num_components
+            for c in range(num_components):
+                v = floats[offset + c]
+                if v < min_vec[c]:
+                    min_vec[c] = v
+                if v > max_vec[c]:
+                    max_vec[c] = v
+
+        return min_vec, max_vec
+
     def _recursive_node_parse(
         self, parent: Optional[pygltflib.Node], pssg_node: PssgModelTree.PssgModelNode
     ) -> int:
@@ -4850,14 +4877,20 @@ class PssgGltfBuilder:
             and len(pssg_node.render_data_sources) != 0
         ):
             gltf_primitives: list[pygltflib.Primitive] = []
+            gltf_weights: list[float] | None = None
 
             for render_instance in pssg_node.render_data_sources:
                 logging.info("exporting render data source %s", render_instance.id)
 
                 gltf_attributes = pygltflib.Attributes()
+                pssg_attribute_streams: dict[str, PssgModelTree.PssgVertexStream] = {}
+
                 for pssg_vertex_stream in render_instance.vertex_streams:
                     pssg_vertex_attrib = pssg_vertex_stream.attribute
                     type_mapping = PSSG_TO_GLTF_ACCESSOR[pssg_vertex_stream.format.name]
+                    pssg_attribute_streams[pssg_vertex_stream.attribute.name] = (
+                        pssg_vertex_stream
+                    )
 
                     if type_mapping is None:
                         raise Exception(
@@ -4944,18 +4977,85 @@ class PssgGltfBuilder:
                     if render_instance.texture is not None
                     else None
                 )
-                gltf_primitives.append(
-                    pygltflib.Primitive(
-                        attributes=gltf_attributes,
-                        indices=ib_accessor,
-                        material=gltf_material,
-                    )
-                )
 
-            gltf_mesh = pygltflib.Mesh(name=pssg_node.id, primitives=gltf_primitives)
-            mesh_index = len(self.gltf.meshes)
-            self.gltf.meshes.append(gltf_mesh)
-            gltf_node.mesh = mesh_index
+                # if has morph targets, then convert them
+                # gltf requires the morph targets to be deltas
+                # but pssg supplies them as absolute keyframe values
+                gltf_morph_targets = []
+
+                if len(render_instance.morph_targets) > 0:
+                    gltf_weights = render_instance.morph_weights[1:]
+
+                for pssg_morph_target in render_instance.morph_targets:
+                    gltf_morph_target = pygltflib.Attributes()
+                    for pssg_vertex_stream in pssg_morph_target.vertex_streams:
+                        type_mapping = PSSG_TO_GLTF_ACCESSOR[
+                            pssg_vertex_stream.format.name
+                        ]
+                        component_type, accessor_type, _ = type_mapping
+
+                        initial_vertex_stream = pssg_attribute_streams[
+                            pssg_vertex_stream.attribute.name
+                        ]
+                        pssg_type, components = (
+                            initial_vertex_stream.format.value
+                        )  # pssg type here is always float anyways
+
+
+                        num_scalars = components * initial_vertex_stream.element_count
+                        delta_vertex_stream: bytearray = bytearray(4 * num_scalars)
+                        for i in range(num_scalars):
+                            initial = struct.unpack_from(
+                                "<f", initial_vertex_stream.buffer, i * 4
+                            )[0]
+                            target = struct.unpack_from(
+                                "<f", pssg_vertex_stream.buffer, i * 4
+                            )[0]
+                            delta = target - initial
+                            struct.pack_into("<f", delta_vertex_stream, i * 4, delta)
+
+                        min_, max_ = self._min_max_vectors(delta_vertex_stream, components)
+                        setattr(
+                            gltf_morph_target,
+                            PSSG_ATTRIB_MAPPING[pssg_vertex_stream.attribute.value],
+                            self._add_accessor_and_view(
+                                data=delta_vertex_stream,
+                                target=pygltflib.ARRAY_BUFFER,
+                                accessor_type=accessor_type,
+                                component_type=component_type,
+                                count=pssg_vertex_stream.element_count,
+                                min_=min_,
+                                max_=max_,
+                            ),
+                        )
+
+                    gltf_morph_targets.append(gltf_morph_target)
+
+                if len(gltf_morph_targets) > 0:
+                    gltf_primitives.append(
+                        pygltflib.Primitive(
+                            attributes=gltf_attributes,
+                            indices=ib_accessor,
+                            targets=gltf_morph_targets,
+                            material=gltf_material,
+                        )
+                    )
+                else:
+                    gltf_primitives.append(
+                        pygltflib.Primitive(
+                            attributes=gltf_attributes,
+                            indices=ib_accessor,
+                            material=gltf_material,
+                        )
+                    )
+
+            if len(gltf_primitives) > 0:
+                gltf_mesh = pygltflib.Mesh(
+                    name=pssg_node.id, primitives=gltf_primitives, weights=gltf_weights
+                )
+                mesh_index = len(self.gltf.meshes)
+                self.gltf.meshes.append(gltf_mesh)
+                gltf_node.mesh = mesh_index
 
         if isinstance(pssg_node, PssgModelTree.PssgModelSkinnedNode):
             self.process_skin_nodes.append(pssg_node)
@@ -5074,7 +5174,10 @@ class PssgGltfBuilder:
                     continue
 
                 if pssg_channel.target_node not in self.pssg_to_gltf_node:
-                    logging.warning("%s does not exist, invalid motion target", pssg_channel.target_node)
+                    logging.warning(
+                        "%s does not exist, invalid motion target",
+                        pssg_channel.target_node,
+                    )
                     continue
 
                 acc_time, acc_value = accessors
@@ -5097,7 +5200,11 @@ class PssgGltfBuilder:
                     )
                 )
 
-            self.gltf.animations.append(pygltflib.Animation(name=pssg_motion_id, samplers=gltf_samplers, channels=gltf_channels))
+            self.gltf.animations.append(
+                pygltflib.Animation(
+                    name=pssg_motion_id, samplers=gltf_samplers, channels=gltf_channels
+                )
+            )
 
     def _pack_motion_buffer(
         self,
