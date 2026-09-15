@@ -1,0 +1,4 @@
+pillow==12.3.0
+pygltflib==1.16.5
+PyOpenGL==3.1.10
+wxPython==4.3.1
