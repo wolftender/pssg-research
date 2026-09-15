@@ -4,6 +4,14 @@ This is a very loosely managed research project regarding pssg file format from 
 
 This project is not meant to be a production-ready asset ripping pipeline, it is a simple research project, so don't expect miracles, but feel free to report any issues (or contribute a fix yourself as a PR). 
 
+## Cool demo
+<table>
+<tr>
+<td><img src="images/image1.png" alt="viewer in action #1" width="400"></td>
+<td><img src="images/image2.png" alt="viewer in action #2" width="400"></td>
+</tr>
+</table>
+
 ## Usage
 If you are here just for the usage part you can skip the other sections. I used Python 3.13 when developing this program. Python does not care for compatibility between minor versions so I cannot guarantee it will work with any other version. First you need to install the requirements from ``requirements.txt`` file. 
 
